@@ -173,24 +173,46 @@ impl<H> Shared<With<H, dyn Frame>> {
     }
 }
 
+/// A slice being written: its first values, and the memory they are in.
+struct Half<T> {
+    first: *mut T,
+    written: usize,
+    memory: NonNull<u8>,
+    layout: Layout,
+}
+
+impl<T> Drop for Half<T> {
+    fn drop(&mut self) {
+        // SAFETY: the first `written` values were written and nobody else has them; the memory was taken
+        // with this layout and is given back once
+        unsafe {
+            ptr::drop_in_place(ptr::slice_from_raw_parts_mut(self.first, self.written));
+            give(self.memory, self.layout);
+        }
+    }
+}
+
 impl<T> Shared<[T]> {
     /// The `len` values of `values`, which gives that many.
     pub fn from_exact(len: usize, values: impl Iterator<Item = T>) -> Self {
         let values_layout = Layout::array::<T>(len).expect("a slice no bigger than memory");
         let (layout, _) = Layout::new::<Cell<usize>>().extend(values_layout).expect("a slice no bigger than memory");
-        let memory = take(layout.pad_to_align());
+        let layout = layout.pad_to_align();
+        let memory = take(layout);
         // a pointer to a slot of `len` values: the layout taken is this one's, by the rule of C
         let slot = ptr::slice_from_raw_parts_mut(memory.as_ptr(), len) as *mut Slot<[T]>;
         // SAFETY: the place of a field in memory that is this slot's
         let first = unsafe { (&raw mut (*slot).value).cast::<T>() };
-        let mut written = 0;
+        // until every value is written the slot is not a slice yet: if `values` panics or gives too few, what
+        // is written is dropped and the memory given back
+        let mut half = Half { first, written: 0, memory, layout };
         for value in values.take(len) {
-            // SAFETY: there is room for `len` values, and this is one of the first `len`. If `values` panics,
-            // what is written is forgotten with its memory.
-            unsafe { first.add(written).write(value) };
-            written += 1;
+            // SAFETY: there is room for `len` values, and this is one of the first `len`
+            unsafe { first.add(half.written).write(value) };
+            half.written += 1;
         }
-        assert!(written == len, "as many values as said");
+        assert!(half.written == len, "as many values as said");
+        std::mem::forget(half);
         // SAFETY: the values are all written, and the count is, here
         unsafe {
             (&raw mut (*slot).owners).write(Cell::new(1));
