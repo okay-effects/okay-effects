@@ -16,7 +16,7 @@ SCALA_CP=$(cd scala && scala-cli compile . --print-class-path --server=false 2>/
 
 echo "== java"
 (cd java && javac --release 25 -Xlint:all -Werror -d out $(find src test -name '*.java') &&
-  java -cp out okay.algebraic.Properties > /tmp/okay-effects-java.log 2>&1)
+  java -cp out okay.effects.java.Properties > /tmp/okay-effects-java.log 2>&1)
 ok $? "java: $(grep -c '^  + ' /tmp/okay-effects-java.log) tests (/tmp/okay-effects-java.log)"
 
 echo "== rust"
@@ -26,7 +26,7 @@ ok $? "rust: $(grep -c '\.\.\. ok$' /tmp/okay-effects-rust.log) tests (/tmp/okay
 demo() { # the demonstration of a language, as a command
   case $1 in
     scala) echo "java -cp $SCALA_CP okay.effects.scala.wire.wireDemo $2" ;;
-    java) echo "java -cp java/out okay.algebraic.wire.Demo $2" ;;
+    java) echo "java -cp java/out okay.effects.java.wire.Demo $2" ;;
     rust) echo "rust/target/debug/examples/demo $2" ;;
   esac
 }
