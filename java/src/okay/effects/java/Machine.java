@@ -1,6 +1,7 @@
 package okay.effects.java;
 
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /** THE MACHINE: one loop. What waits for the value is a stack of LEVELS, one for each handler the program is under:
  * the frames inside the handler, the handler, its state. The top level is kept unpacked in the loop's variables.
@@ -11,6 +12,11 @@ import java.util.function.Function;
  *   Ask        the operation's handler is found. In place: it answers, the loop goes on — nothing is allocated.
  *              General: the levels above and at the handler are taken off as `k`, and the clause runs below them
  *   Resume     the levels of a `k` are put back on top
+ *   ensuring   a bind whose frame holds the finalizer (`Finally`): a value that comes to it waits while the
+ *              finalizer runs
+ *   Unwind     the levels of a `k` are put back on top, without its handler, and walked
+ *   Walk       UNWINDING: the frames are passed with no value, a finalizer's frame runs its finalizer, a level is
+ *              left without its `ret` — to the end of the unwinding, which gives nothing to what waited for it
  *
  * HOW A HANDLER IS FOUND: by the operation's place in the row, as the types say. A level put by `handle` is a ROW
  * level: it took the first effect off the row. An operation says how many row levels it skips — none, when asked
@@ -21,6 +27,11 @@ import java.util.function.Function;
  *
  * A marker is a level like any other: popped when its computation has its value, taken into a `k` and put back
  * with the rest, copied when a state under it changes. So what holds of levels holds with markers among them.
+ *
+ * WHERE A HANDLER WAS, while its `k` is unwound, is a marker too: the handler has left, and answers nothing. One
+ * put by `handle` took a place of the row: the operations that pass skip one level less, and its own — with none
+ * to skip — has nobody left to answer it: the finalizer that asks ends there, and the unwinding goes on (`GONE`).
+ * One that kept its effect in the row sends its own to the next place (`KEPT`). An interceptor leaves no marker.
  *
  * Levels and frames are never changed: a `k` is shared, never copied, and may be resumed any number of times.
  * Types are checked at the kernel's surface (Effects.java); in here they are raw and values are `Object` — Java
@@ -38,6 +49,10 @@ final class Machine {
 
     static Mark marker(int keep, int by) { return new Mark(null, null, null, false, keep, by); }
 
+    /** where a handler that took its place of the row was, and one that kept its effect there */
+    static final Mark GONE = marker(0, -1);
+    static final Mark KEPT = marker(1, -1);
+
     boolean marker() { return by != 0; }
 
     /** an interceptor's question: is the operation of its class, and its own */
@@ -49,12 +64,24 @@ final class Machine {
   /** what follows a value, inside one level */
   record Frames(Function<Object, Comp> next, Frames rest) {}
 
+  /** `ensuring`: the frame of a finalizer. A value that comes waits while the finalizer runs; an unwinding runs
+   * the finalizer and goes on. */
+  record Finally<A>(Supplier<? extends Comp<?, ?>> finalizer) implements Function<A, Comp<A, ?>> {
+    public Comp<A, ?> apply(A a) { return new Comp.Bind<>(finalizer.get(), dropped -> new Comp.Done<>(a)); }
+  }
+
+  /** the end of an unwinding, a frame over what waited for it: nothing is given on */
+  static final class Unwound implements Function<Object, Comp> {
+    public Comp apply(Object dropped) { return new Comp.Done(null); }
+  }
+
   /** a level under the top one; a level with a handler or a marker always has a level below it */
   record Level(Frames frames, Mark mark, Object state, Level below) {}
 
   /** the levels of a continuation, the lowest first */
-  record Pieces(Frames frames, Mark mark, Object state, Pieces above) implements Function<Object, Comp> {
+  record Pieces(Frames frames, Mark mark, Object state, Pieces above) implements Step.Rest {
     public Comp apply(Object x) { return new Comp.Resume(this, x); }
+    public Comp unwind() { return new Comp.Unwind(this, null); }
   }
 
   static <A, R> Step<A, R> run(Comp<A, R> p) {
@@ -78,7 +105,12 @@ final class Machine {
           Object op = ask.op;
           // the common case first: asked plainly, right under the handler of the row's first effect
           int found = mark != null && mark.row && ask.skip == 0 ? 0 : find(op, ask.skip, mark, below);
-          if (found < 0) return new Step.Asked(ask.op, take(frames, mark, state, below, -1));
+          if (found < 0) {
+            if (found == -1) return new Step.Asked(ask.op, take(frames, mark, state, below, -1));
+            // its handler has left: the finalizer that asks ends here, and the unwinding goes on from here
+            c = new Comp.Walk(ending(found == -2 ? below : level(below, -2 - found).below));
+            continue;
+          }
           Level at = level(below, found);
           Mark handler = found == 0 ? mark : at.mark;
           // The handler takes `op` as its effect: a cast, with no test. It holds by the types: the row sent the
@@ -114,6 +146,43 @@ final class Machine {
           frames = piece.frames; mark = piece.mark; state = piece.state;
           value = resume.x;
         }
+        case Comp.Unwind unwind -> {
+          // the levels of `k`, over the end of the unwinding. A value that comes out of one of them — a handler
+          // in it answered a finalizer — is dropped there, and the unwinding goes on (`walk`, as a frame).
+          Unwound end = new Unwound();
+          Comp.Walk walk = new Comp.Walk(end);
+          below = new Level(new Frames(end, frames), mark, state, below);
+          Pieces piece = unwind.k;
+          Mark at = piece.mark != null && piece.mark.row ? unwind.left : null;
+          while (piece.above != null) {
+            below = new Level(new Frames(walk, piece.frames), at, piece.state, below);
+            piece = piece.above;
+            at = piece.mark;
+          }
+          frames = piece.frames; mark = at; state = piece.state;
+          c = walk;
+          continue;
+        }
+        case Comp.Walk walk -> {
+          while (true) {
+            if (frames == null) {
+              // a level is left without its `ret`. At the bottom, the unwinding is not on this stack.
+              if (below == null) throw new NoUnwinding();
+              frames = below.frames; mark = below.mark; state = below.state; below = below.below;
+            } else if (frames.next instanceof Finally last) {
+              c = (Comp) last.finalizer.get();
+              frames = new Frames(walk, frames.rest);
+              continue run;
+            } else if (frames.next == walk.to) {
+              frames = frames.rest;
+              break;
+            } else {
+              // a bind; or what an unwinding begun inside this one left
+              frames = frames.rest;
+            }
+          }
+          value = null;
+        }
       }
       // the value: a level with no frame left gives it to its handler's `ret`, and is popped; a marker only pops.
       // The marker is told by its number: a test of a field for null here sent the JIT into deoptimizing again
@@ -133,8 +202,9 @@ final class Machine {
     }
   }
 
-  /** how many levels down the operation's handler is, the top one being 0; -1 when there is none. `skip` is how
-   * many row levels the operation has still to pass: a marker adds to it, a row level passed takes one off. */
+  /** how many levels down the operation's handler is, the top one being 0; -1 when there is none; -2 - depth when
+   * it was the handler that has left the level `depth` down. `skip` is how many row levels the operation has
+   * still to pass: a marker adds to it, a row level passed takes one off. */
   private static int find(Object op, int skip, Mark top, Level below) {
     Mark mark = top;
     Level next = below;
@@ -144,7 +214,8 @@ final class Machine {
           if (skip == 0) return depth;
           skip--;
         } else if (mark.marker()) {
-          if (skip >= mark.keep) skip += mark.by;
+          // below none to skip: the operation's own handler was here, and has left
+          if (skip >= mark.keep && (skip += mark.by) < 0) return -2 - depth;
         } else if (mark.accepts(op)) {
           return depth;
         }
@@ -161,6 +232,12 @@ final class Machine {
     Level at = below;
     for (int left = depth; left > 1; left--) at = at.below;
     return at;
+  }
+
+  /** the end of the unwinding that goes on where a handler has left, from the level under its own: the one its
+   * levels were put back in, or else its own */
+  private static Object ending(Level under) {
+    return under.frames.next instanceof Comp.Walk walk ? walk.to : under.frames.next;
   }
 
   /** the levels from the top down to `depth` (to the bottom when -1), as a continuation */

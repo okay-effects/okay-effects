@@ -1,5 +1,6 @@
 package okay.effects.java;
 
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /** The words of the model: {@code import static okay.effects.java.Effects.*}. */
@@ -52,6 +53,12 @@ public final class Effects {
   /** a computation built when it is reached: a call in tail position takes no stack */
   public static <A, R> Comp<A, R> defer(Supplier<? extends Comp<A, ? super R>> p) {
     return new Comp.Bind<>(new Comp.Done<>(null), nothing -> p.get());
+  }
+
+  /** {@code acquire}d, used, {@code release}d when the use is left: {@code ensuring} of the use */
+  public static <S, A, R> Comp<A, R> bracket(Comp<S, ? super R> acquire,
+      Function<S, ? extends Comp<A, ? super R>> use, Function<S, ? extends Comp<?, ? super R>> release) {
+    return Effects.<S, R>fit(acquire).flatMap(s -> Effects.<A, R>fit(use.apply(s)).ensuring(() -> release.apply(s)));
   }
 
   /** the operations of {@code F}, the first effect of the program's row, answered by {@code h}: all those the row

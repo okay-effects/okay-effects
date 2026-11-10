@@ -89,7 +89,8 @@ public sealed interface Emit<T> {
     }, p);
   }
 
-  /** a stream of the first {@code n} values; the producer is not resumed after them */
+  /** a stream of the first {@code n} values; the producer is not resumed after them: it is left there, unwound.
+   * What its finalizers send then goes to the stream's handler, past this cut. */
   static <T, A, R> Comp<Void, Eff<Emit<T>, R>> take(int n, Comp<A, ? super Eff<Emit<T>, Eff<Emit<T>, R>>> p) {
     return taken(n, p);
   }
@@ -102,15 +103,19 @@ public sealed interface Emit<T> {
           public Comp<Function<Integer, Comp<Void, R>>, R> ret(A a) { return pure(left -> pure(null)); }
           public Comp<Function<Integer, Comp<Void, R>>, R> on(Emit<T> op, K<Function<Integer, Comp<Void, R>>, R> k) {
             return switch (op) {
-              case Send<T> send -> pure(left -> left <= 0 ? pure(null) : send(send.value()).then(() ->
-                  left == 1 ? pure(null) : k.resume(send, null).flatMap(rest -> rest.apply(left - 1))));
+              case Send<T> send -> pure(left -> left <= 0 ? K.unwindKeeping(k, send) : send(send.value()).then(() ->
+                  left == 1 ? K.unwindKeeping(k, send) : k.resume(send, null).flatMap(rest -> rest.apply(left - 1))));
             };
           }
         }, p);
     return taking.flatMap(rest -> rest.apply(n));
   }
 
-  /** the values, pulled as they are needed: the producer runs no further than was asked */
+  /** the values, pulled as they are needed: the producer runs no further than was asked. NOT READ TO ITS END, the
+   * sequence keeps the rest of the producer and nobody leaves it: its finalizers ({@code ensuring}) do not run. A
+   * producer that holds something is read to its end, or cut by {@code take} before it is pulled:
+   * {@code pull(take(n, p))}. The same holds of {@code zip} and {@code merge}, which pull: of the stream that is
+   * not read to its end. */
   static <T, A> Iterator<T> pull(Comp<A, ? super Eff<Emit<T>, Pure>> p) {
     Lazy<T> values = new Lazy<>(() -> run(handle(Emit.class, new Handler<Emit<T>, A, Lazy.Next<T>, Pure>() {
       public Comp<Lazy.Next<T>, Pure> ret(A a) { return pure(null); }

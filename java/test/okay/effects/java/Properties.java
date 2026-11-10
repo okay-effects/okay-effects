@@ -10,6 +10,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
+import java.util.function.Supplier;
 import okay.effects.java.std.Async;
 import okay.effects.java.std.Choose;
 import okay.effects.java.std.Clock;
@@ -179,6 +181,127 @@ final class Properties {
   @SuppressWarnings("unchecked") // on purpose: the only way to an operation with no handler
   static <A> Comp<A, Pure> closed(Comp<A, ?> open) { return (Comp<A, Pure>) open; }
 
+  // ---- a finalizer runs when a part of a program is left: with its value, or unwound
+
+  static List<String> log = new ArrayList<>();
+
+  /** {@code what} is written down when this program runs */
+  static <R> Comp<Void, R> said(String what) {
+    return defer(() -> {
+      log.add(what);
+      return pure(null);
+    });
+  }
+
+  /** a result, and what was said on the way, in order */
+  static <A> Pair<A, List<String>> told(Supplier<A> result) {
+    log = new ArrayList<>();
+    A a = result.get();
+    return new Pair<>(a, List.copyOf(log));
+  }
+
+  /** an account whose handler does with the deposit and the rest of the program what {@code on} says */
+  static <R> Comp<Integer, R> account(
+      BiFunction<Deposit, K<Integer, R>, Comp<Integer, R>> on, Comp<Integer, ? super Eff<Account, R>> p) {
+    return handle(Account.class, new Handler<Account, Integer, Integer, R>() {
+      public Comp<Integer, R> ret(Integer a) { return pure(a); }
+      public Comp<Integer, R> on(Account op, K<Integer, R> k) {
+        return switch (op) {
+          case Deposit deposit -> on.apply(deposit, k);
+        };
+      }
+    }, p);
+  }
+
+  static Comp<Integer, Eff<Account, ?>> deposited() {
+    return perform(new Deposit(1)).ensuring(() -> said("closed"));
+  }
+
+  static Comp<Integer, Eff<Throws<String>, ?>> raised() { return Throws.raise("no"); }
+
+  static Comp<Integer, Eff<Choose, ?>> opened(int x) {
+    return Properties.<Eff<Choose, ?>>said("open " + x).then(() -> x == 1 ? Choose.<Integer>none() : pure(x))
+        .ensuring(() -> said("closed " + x));
+  }
+
+  static Comp<Integer, Eff<Choose, ?>> tenfold(int x) {
+    Comp<Integer, Eff<Choose, ?>> path = x == 2 ? Choose.none() : pure(x * 10);
+    return path.ensuring(() -> said("closed " + x));
+  }
+
+  static Comp<Void, Eff<State<Integer>, ?>> tick() { return State.modify(s -> s + 1); }
+
+  static Comp<Void, Eff<State<Integer>, ?>> saw() {
+    return State.<Integer>get().flatMap(s -> said("saw " + s).then(() -> State.put(s + 1)));
+  }
+
+  /** a state left at 5 by a failure, seen by a finalizer: the state inside the handler of the failure */
+  static Comp<Integer, Eff<State<Integer>, Eff<Throws<String>, ?>>> stateInside() {
+    Comp<Integer, Eff<State<Integer>, Eff<Throws<String>, ?>>> failing =
+        State.put(5).flatMap(done -> up(Throws.raise("no")));
+    return failing.ensuring(() -> saw());
+  }
+
+  /** the same, the state outside the handler of the failure: the row the other way */
+  static Comp<Integer, Eff<Throws<String>, Eff<State<Integer>, ?>>> stateOutside() {
+    Comp<Integer, Eff<Throws<String>, Eff<State<Integer>, ?>>> failing =
+        up(State.put(5)).flatMap(done -> Throws.raise("no"));
+    return failing.ensuring(() -> up(saw()));
+  }
+
+  /** each path of a choice leaves its state, and has no value */
+  static Comp<Integer, Eff<State<Integer>, Eff<Choose, ?>>> statePaths() {
+    return up(Choose.among(List.of(1, 2))).flatMap(x -> {
+      Comp<Integer, Eff<State<Integer>, Eff<Choose, ?>>> ended = State.put(x).flatMap(done -> up(Choose.none()));
+      return ended.ensuring(() -> State.<Integer>get().flatMap(s -> said("saw " + s)));
+    });
+  }
+
+  /** a failure, and a finalizer that fails with a number: the number's handler outside the failure's */
+  static Comp<Integer, Eff<Throws<String>, ? extends Eff<Throws<Integer>, ?>>> closingOutside() {
+    Comp<Integer, Eff<Throws<String>, ? extends Eff<Throws<Integer>, ?>>> failing = fit(Throws.raise("no"));
+    return failing.ensuring(() -> up(Throws.<Integer, Void>raise(7)).then(() -> said("not run")))
+        .ensuring(() -> said("outer"));
+  }
+
+  /** the same, the number's handler inside the failure's: the row the other way */
+  static Comp<Integer, Eff<Throws<Integer>, ? extends Eff<Throws<String>, ?>>> closingInside() {
+    Comp<Integer, Eff<Throws<Integer>, ? extends Eff<Throws<String>, ?>>> failing = fit(up(Throws.raise("no")));
+    return failing.ensuring(() -> Throws.<Integer, Void>raise(7).then(() -> said("not run")))
+        .ensuring(() -> said("outer"));
+  }
+
+  static Comp<Integer, Eff<Throws<String>, ?>> used(boolean fails) {
+    return bracket(Properties.<Eff<Throws<String>, ?>>said("open").map(done -> "file"),
+        f -> said("use " + f).then(() -> fails ? Throws.<String, Integer>raise("no") : pure(f.length())),
+        f -> said("close " + f));
+  }
+
+  static Comp<Integer, Eff<State<Integer>, ?>> ticking(int n) {
+    return n == 0 ? State.get() : tick().ensuring(() -> tick()).then(() -> ticking(n - 1));
+  }
+
+  /** an interceptor found by the class, in a row where the numbers' handler is one place out: every fresh number
+   * that passes is seen, and asked again */
+  static <A, R extends Eff<?, ? extends Eff<Fresh, ?>>> Comp<A, R> watched(List<String> seen, Comp<A, ? super R> p) {
+    return intercept(Fresh.class, new Handler<Fresh, A, A, R>() {
+      public Comp<A, R> ret(A a) { return pure(a); }
+      public Comp<A, R> on(Fresh op, K<A, R> k) {
+        seen.add(op.toString());
+        return switch (op) {
+          case Fresh.Next next -> up(perform(next)).flatMap(n -> k.resume(next, n));
+        };
+      }
+    }, p);
+  }
+
+  /** a state written, a failure, and a finalizer that writes the state: the failure first in the row */
+  static Comp<Void, Eff<Throws<String>, Eff<State<Integer>, ?>>> small() {
+    Comp<Void, Eff<Throws<String>, Eff<State<Integer>, ?>>> failing =
+        up(State.put(1)).flatMap(done -> Throws.raise("no"));
+    return failing.ensuring(() -> up(State.put(2)));
+  }
+
   public static void main(String[] args) {
     test("a row: handlers take their effects one by one, a program runs when none is left", () -> {
       var got = run(Throws.run(Writer.run(State.run(1, logged()))));
@@ -327,6 +450,190 @@ final class Properties {
       same(run(Fresh.run(hundred(seen, Fresh.run(twoFresh())))), new Pair<>(0L, 100L));
       same(seen, List.of("Next[]"));
     });
+
+    test("ensuring, a value: the finalizer runs after the program, and the program's value is the result", () -> {
+      Comp<Integer, Pure> p =
+          Properties.<Pure>said("body").map(done -> 1).ensuring(() -> said("closed").map(done -> 2));
+      same(told(() -> run(p)), new Pair<>(1, List.of("body", "closed")));
+      // a finalizer is made when it runs: building the program runs nothing
+      log = new ArrayList<>();
+      Comp<Integer, Pure> built = Effects.<Integer, Pure>pure(1).ensuring(() -> {
+        log.add("closed");
+        return pure(null);
+      });
+      same(log, List.of());
+      same(told(() -> run(built)), new Pair<>(1, List.of("closed")));
+    });
+
+    test("ensuring, a failure: the finalizer runs before the failure is answered", () -> {
+      Comp<Integer, Eff<Throws<String>, ?>> p = Properties.<Eff<Throws<String>, ?>>said("body")
+          .then(() -> raised()).ensuring(() -> said("closed"));
+      Comp<Integer, Pure> rescued = Throws.recover(e -> said("rescued " + e).map(done -> 0), p);
+      same(told(() -> run(rescued)), new Pair<>(0, List.of("body", "closed", "rescued no")));
+      same(told(() -> run(Throws.run(p))), new Pair<>(new Throws.Err<>("no"), List.of("body", "closed")));
+    });
+
+    test("ensuring, a handler's abort: a handler that does not go on unwinds what it leaves", () ->
+        same(told(() -> run(account((deposit, k) -> k.unwind().then(() -> pure(-1)), deposited()))),
+            new Pair<>(-1, List.of("closed"))));
+
+    test("ensuring, the first of the choices: a path with no value is unwound, a path not begun holds nothing", () ->
+        same(told(() -> run(Choose.first(Choose.among(List.of(1, 2, 3)).flatMap(x -> opened(x))))),
+            new Pair<>(Optional.of(2), List.of("open 1", "closed 1", "open 2", "closed 2"))));
+
+    test("ensuring, a stream cut short: the producer is unwound where it stopped", () -> {
+      same(told(() -> run(Emit.collect(Emit.take(2, from(0).ensuring(() -> said("closed")))))),
+          new Pair<>(new Emit.Sent<>(List.of(0, 1), null), List.of("closed")));
+      // what a finalizer sends when the stream is cut goes to the stream's handler: the cut has left
+      same(run(Emit.collect(Emit.take(2, from(0).ensuring(() -> Emit.send(-1))))).values(), List.of(0, 1, -1));
+      same(first(9, Emit.pull(Emit.take(2, from(0).ensuring(() -> Emit.send(-1))))), List.of(0, 1, -1));
+    });
+
+    test("ensuring, every path of a choice: a finalizer after the choice runs once in each path", () ->
+        same(told(() -> run(Choose.all(Choose.among(List.of(1, 2, 3)).flatMap(x -> tenfold(x))))),
+            new Pair<>(List.of(10, 30), List.of("closed 1", "closed 2", "closed 3"))));
+
+    test("ensuring, every path of a choice: a finalizer before the choice runs once for each path that passes it",
+        () -> {
+          Comp<Integer, Eff<Choose, ?>> chosen =
+              Choose.among(List.of(1, 2, 3)).flatMap(x -> said("path " + x).map(done -> x));
+          Comp<Integer, Eff<Choose, ?>> p =
+              chosen.ensuring(() -> said("closed")).flatMap(x -> x == 2 ? Choose.none() : pure(x));
+          same(told(() -> run(Choose.all(p))), new Pair<>(List.of(1, 3),
+              List.of("path 1", "closed", "path 2", "closed", "path 3", "closed")));
+        });
+
+    test("ensuring, nested: the innermost finalizer first, at a value and at a failure", () -> {
+      Comp<Integer, Eff<Throws<String>, ?>> one = pure(1);
+      same(told(() -> run(Throws.run(one.ensuring(() -> said("inner")).ensuring(() -> said("outer"))))),
+          new Pair<>(new Throws.Ok<>(1), List.of("inner", "outer")));
+      Comp<Integer, Eff<Throws<String>, ?>> failed = raised().ensuring(() -> said("inner"))
+          .then(() -> said("not run").map(done -> 2)).ensuring(() -> said("outer"));
+      same(told(() -> run(Throws.run(failed))), new Pair<>(new Throws.Err<>("no"), List.of("inner", "outer")));
+    });
+
+    test("ensuring, state: a finalizer reads and writes the state as its path left it, inside the handler or outside",
+        () -> {
+          // the state inside the handler that leaves: it is in what is unwound, and is dropped after the finalizer
+          same(told(() -> run(Throws.run(State.run(0, stateInside())))),
+              new Pair<>(new Throws.Err<>("no"), List.of("saw 5")));
+          // the state outside it: what the finalizer wrote stays
+          same(told(() -> run(State.run(0, Throws.run(stateOutside())))),
+              new Pair<>(new State.Final<>(6, new Throws.Err<>("no")), List.of("saw 5")));
+          // each path of a choice has the state it left
+          same(told(() -> run(Choose.all(State.run(0, statePaths())))),
+              new Pair<>(List.of(), List.of("saw 1", "saw 2")));
+        });
+
+    test("ensuring, a finalizer that fails at a value: the failure is the result, and what waits outside is unwound",
+        () -> {
+          Comp<Integer, Eff<Throws<String>, ?>> one = pure(1);
+          Comp<Integer, Eff<Throws<String>, ?>> p =
+              one.ensuring(() -> Throws.raise("closing")).ensuring(() -> said("outer"));
+          same(told(() -> run(Throws.run(p))), new Pair<>(new Throws.Err<>("closing"), List.of("outer")));
+        });
+
+    test("ensuring, a finalizer that fails in an unwinding: the unwinding goes on, the failure goes to its handler",
+        () -> {
+          // its handler is outside the one that leaves: it unwinds the rest, and its answer is the result
+          same(told(() -> run(Throws.run(Throws.run(closingOutside())))),
+              new Pair<>(new Throws.Err<>(7), List.of("outer")));
+          // its handler is inside what is unwound: the failure is answered there, and the unwinding goes on from there
+          Comp<Void, Eff<Throws<String>, ?>> inside =
+              Throws.recover(n -> said("rescued " + n).map(done -> 0), closingInside()).then(() -> said("not run"));
+          same(told(() -> run(Throws.run(inside))),
+              new Pair<>(new Throws.Err<>("no"), List.of("outer", "rescued 7")));
+          // its handler is the one that leaves: nobody answers, the finalizer ends there, the first failure stands
+          Comp<Integer, Eff<Throws<String>, ?>> own = raised()
+              .ensuring(() -> Throws.<String, Void>raise("closing").then(() -> said("not run")))
+              .ensuring(() -> said("outer"));
+          same(told(() -> run(Throws.run(own))), new Pair<>(new Throws.Err<>("no"), List.of("outer")));
+        });
+
+    test("ensuring, `k` is a value: unwound twice the finalizers run twice; resumed after, its path ends once more",
+        () -> {
+          Comp<Integer, Eff<Account, ?>> p = perform(new Deposit(1))
+              .flatMap(n -> said("got " + n).map(done -> n)).ensuring(() -> said("closed"));
+          Comp<Integer, Pure> handled = account((deposit, k) ->
+              k.unwind().then(() -> k.unwind()).then(() -> k.resume(deposit, deposit.amount() + 1)), p);
+          same(told(() -> run(handled)), new Pair<>(2, List.of("closed", "closed", "got 2", "closed")));
+        });
+
+    test("ensuring, the rest of an unwinding kept by a handler inside it: resumed where the unwinding is not, refused",
+        () -> {
+          Comp<Integer, Eff<Account, ? extends Eff<Throws<String>, ?>>> failing = fit(up(Throws.raise("no")));
+          Comp<Integer, Eff<Account, ? extends Eff<Throws<String>, ?>>> p =
+              failing.ensuring(() -> perform(new Deposit(1)).then(() -> said("closed")));
+          List<Comp<Integer, Eff<Throws<String>, ?>>> kept = new ArrayList<>();
+          // the finalizer waits at its operation; the unwinding goes on without it
+          Comp<Integer, Eff<Throws<String>, ?>> left = account((deposit, k) -> {
+            kept.add(k.resume(deposit, deposit.amount()));
+            return pure(0);
+          }, p);
+          same(told(() -> run(Throws.run(left))), new Pair<>(new Throws.Err<>("no"), List.of()));
+          // resumed, the finalizer ends — and there is no unwinding to go on with, and no value
+          try {
+            run(Throws.run(kept.get(0)));
+            throw new AssertionError("ran");
+          } catch (NoUnwinding refused) {
+            same(log, List.of("closed"));
+          }
+        });
+
+    test("ensuring, `k` neither resumed nor unwound: nothing of it runs", () ->
+        same(told(() -> run(account((deposit, k) -> pure(0), deposited()))), new Pair<>(0, List.of())));
+
+    test("ensuring, asynchrony: a program that waits is kept, and its finalizer runs when it ends", () -> {
+      ArrayDeque<Runnable> waiting = new ArrayDeque<>();
+      List<Integer> result = new ArrayList<>();
+      Comp<Integer, Eff<Async, ?>> p = later(waiting, 1).map(x -> x + 1).ensuring(() -> said("closed"));
+      same(told(() -> { Async.start(p, result::add); return result.size(); }), new Pair<>(0, List.of()));
+      same(told(() -> { waiting.pop().run(); return result; }), new Pair<>(List.of(2), List.of("closed")));
+    });
+
+    test("bracket: acquired, used, released — when the use ends and when it fails", () -> {
+      same(told(() -> run(Throws.run(used(false)))),
+          new Pair<>(new Throws.Ok<>(4), List.of("open", "use file", "close file")));
+      same(told(() -> run(Throws.run(used(true)))),
+          new Pair<>(new Throws.Err<>("no"), List.of("open", "use file", "close file")));
+    });
+
+    test("ensuring, constant stack: a million finalizers in a loop", () ->
+        same(run(State.run(0, ticking(1_000_000))), new State.Final<>(2_000_000, 2_000_000)));
+
+    test("ensuring, constant stack: a continuation with a hundred thousand waiting finalizers is unwound", () -> {
+      Comp<Integer, Eff<Throws<String>, ? extends Eff<State<Integer>, ?>>> p = fit(Throws.raise("no"));
+      for (int i = 0; i < 100_000; i++) p = p.ensuring(() -> up(tick()));
+      same(run(State.run(0, Throws.run(p))), new State.Final<>(100_000, new Throws.Err<>("no")));
+    });
+
+    test("ensuring, an interceptor between the finalizer and the handler that leaves sees what the finalizer asks",
+        () -> {
+          List<String> seen = new ArrayList<>();
+          Comp<Integer, Eff<Throws<String>, Eff<Fresh, ?>>> failing =
+              up(Fresh.fresh()).flatMap(n -> Throws.raise("no"));
+          Comp<Integer, Eff<Throws<String>, Eff<Fresh, ?>>> p =
+              failing.ensuring(() -> up(Fresh.fresh()).flatMap(n -> said("fresh " + n)));
+          same(told(() -> run(Fresh.run(Throws.run(watched(seen, p))))),
+              new Pair<>(new Throws.Err<>("no"), List.of("fresh 1")));
+          same(seen, List.of("Next[]", "Next[]"));
+        });
+
+    test("ensuring, a program under a marker (`up`, `under`): its finalizer runs there, its places counted", () -> {
+      Comp<Void, Eff<Writer<String>, Eff<Throws<String>, Eff<State<Integer>, ?>>>> over =
+          Writer.tell("before").flatMap(told -> up(small()).flatMap(left -> Writer.tell("after")));
+      same(run(State.run(0, Throws.run(Writer.run(over)))), new State.Final<>(2, new Throws.Err<>("no")));
+      Comp<Void, Eff<Throws<String>, Eff<Writer<String>, Eff<State<Integer>, ?>>>> between =
+          up(Writer.tell("before")).flatMap(told -> under(small()).flatMap(left -> up(Writer.tell("after"))));
+      same(run(State.run(0, Writer.run(Throws.run(between)))),
+          new State.Final<>(2, new Writer.Logged<>(List.of("before"), new Throws.Err<>("no"))));
+    });
+
+    test("ensuring, an operation no handler answers: whoever steps the program resumes its rest, or unwinds it",
+        () -> {
+          if (!(step(deposited()) instanceof Step.Asked<?, Integer, ?> asked)) throw new AssertionError("no operation");
+          same(told(() -> step(asked.k().unwind())), new Pair<>(new Step.Done<>(null), List.of("closed")));
+        });
 
     test("a thousand random programs: the reference machine's digest", () -> same(Tck.digest(), Tck.DIGEST));
 

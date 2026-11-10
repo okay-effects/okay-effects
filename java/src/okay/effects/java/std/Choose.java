@@ -11,7 +11,8 @@ import okay.effects.java.Handler;
 import okay.effects.java.K;
 import okay.effects.java.Op;
 
-/** CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times. */
+/** CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times. With no
+ * value it is left: unwound. */
 public sealed interface Choose {
   record Among<X>(List<X> values) implements Choose, Op<Choose, X, Among<X>> {}
 
@@ -26,6 +27,7 @@ public sealed interface Choose {
       public Comp<List<A>, R> ret(A a) { return pure(List.of(a)); }
       public Comp<List<A>, R> on(Choose op, K<List<A>, R> k) {
         return switch (op) {
+          case Among<?> among when among.values().isEmpty() -> k.unwind().map(left -> List.of());
           case Among<?> among -> every(among, 0, List.of(), k);
         };
       }
@@ -41,12 +43,13 @@ public sealed interface Choose {
     });
   }
 
-  /** the first value the program comes to, the other paths not taken */
+  /** the first value the program comes to, the other paths not taken: they were not begun, and hold nothing */
   static <A, R> Comp<Optional<A>, R> first(Comp<A, ? super Eff<Choose, R>> p) {
     return handle(Choose.class, new Handler<Choose, A, Optional<A>, R>() {
       public Comp<Optional<A>, R> ret(A a) { return pure(Optional.of(a)); }
       public Comp<Optional<A>, R> on(Choose op, K<Optional<A>, R> k) {
         return switch (op) {
+          case Among<?> among when among.values().isEmpty() -> k.unwind().map(left -> Optional.empty());
           case Among<?> among -> from(among, 0, k);
         };
       }

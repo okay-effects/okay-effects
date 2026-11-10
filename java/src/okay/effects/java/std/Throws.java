@@ -9,7 +9,7 @@ import okay.effects.java.Handler;
 import okay.effects.java.K;
 import okay.effects.java.Op;
 
-/** THROWS: the rest of the program is dropped. */
+/** THROWS: the rest of the program is left — unwound, its finalizers run — before the failure is answered. */
 public sealed interface Throws<E> {
   /** answered by nothing: by an {@code X} of any type, for there will be none */
   record Raise<E, X>(E error) implements Throws<E>, Op<Throws<E>, X, Raise<E, X>> {}
@@ -25,7 +25,7 @@ public sealed interface Throws<E> {
       public Comp<Result<E, A>, R> ret(A a) { return pure(new Ok<>(a)); }
       public Comp<Result<E, A>, R> on(Throws<E> op, K<Result<E, A>, R> k) {
         return switch (op) {
-          case Raise<E, ?> raise -> pure(new Err<>(raise.error()));
+          case Raise<E, ?> raise -> k.unwind().then(() -> pure(new Err<>(raise.error())));
         };
       }
     }, p);
@@ -38,7 +38,7 @@ public sealed interface Throws<E> {
       public Comp<A, R> ret(A a) { return pure(a); }
       public Comp<A, R> on(Throws<E> op, K<A, R> k) {
         return switch (op) {
-          case Raise<E, ?> raise -> fit(rescue.apply(raise.error()));
+          case Raise<E, ?> raise -> k.unwind().then(() -> rescue.apply(raise.error()));
         };
       }
     }, p);
