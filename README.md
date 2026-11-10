@@ -366,8 +366,8 @@ cd rust && cargo run --release --example bench
   few thousand steps that runs there: the chain of binds and frames dropped, and — in one test — the finalizers in
   a loop, the waiting finalizers unwound, and the finalizers never run and dropped. The other five have none: the
   million operations, the binds nested to the left, the mutual tail calls, the endless stream, the million
-  answers given at once. The wire is not part of this: of its tests in `src/wire`, the CBOR examples fail under
-  Miri (a float decoded as `1.0000000000000002` for `1.0`).
+  answers given at once. The wire's tests are not part of this: its CBOR tests pass under Miri, the
+  rest were not run there.
 - **A finalizer runs only when the machine leaves its program.** Not when the host throws or panics out of the
   run; not for a `k` that a clause neither resumes nor unwinds (in Rust: drops); not for a stream pulled
   (`Emit.pull`, `zip`, `merge`) and not read to its end — `take` under the `pull` cuts it first. A `k` unwound twice

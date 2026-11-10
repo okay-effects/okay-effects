@@ -141,12 +141,17 @@ impl Input<'_> {
 fn half(bits: u16) -> f64 {
     let (exponent, fraction) = ((bits >> 10) & 0x1f, (bits & 0x3ff) as f64);
     let value = match exponent {
-        0 => fraction * 2f64.powi(-24),
+        0 => fraction * two_to(-24),
         31 if fraction == 0.0 => f64::INFINITY,
         31 => f64::NAN,
-        _ => (1024.0 + fraction) * 2f64.powi(exponent as i32 - 25),
+        _ => (1024.0 + fraction) * two_to(exponent as i32 - 25),
     };
     if bits & 0x8000 == 0 { value } else { -value }
+}
+
+/// a power of two, exactly: its bits, not `powi`, whose last bit Rust does not promise
+fn two_to(exponent: i32) -> f64 {
+    f64::from_bits(((exponent + 1023) as u64) << 52)
 }
 
 #[cfg(test)]
