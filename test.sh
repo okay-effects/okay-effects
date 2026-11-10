@@ -1,9 +1,10 @@
 #!/bin/sh
-# Everything this repository promises, checked: each kernel's own tests (the properties of the model and the family's
-# TCK digest), every worker against the wire's transcript, and every host with every worker — nine pairs, one answer.
+# Everything this repository promises, checked: each kernel's own tests (the properties of the model, the family's
+# TCK digest, the programs that must not compile, the wire's codecs), every worker against the wire's transcripts,
+# and every host with every worker — nine pairs, one answer.
 cd "$(dirname "$0")" || exit 1
 failed=0
-ok() { # a line for a check that passed, or the count of those that did not
+ok() { # a line for a check that passed, or one more that did not
   if [ "$1" -eq 0 ]; then echo "  + $2"; else echo "==> X $2"; failed=$((failed + 1)); fi
 }
 
@@ -15,13 +16,18 @@ ok $status "scala: $count tests (/tmp/okay-effects-scala.log)"
 SCALA_CP=$(cd scala && scala-cli compile . --print-class-path --server=false 2>/dev/null | tail -1)
 
 echo "== java"
-(cd java && javac --release 25 -Xlint:all -Werror -d out $(find src test -name '*.java') &&
-  java -cp out okay.effects.java.Properties > /tmp/okay-effects-java.log 2>&1)
-ok $? "java: $(grep -c '^  + ' /tmp/okay-effects-java.log) tests (/tmp/okay-effects-java.log)"
+javac --release 25 -Xlint:all -Werror -d java/out $(find java/src java/test -name '*.java')
+ok $? "java: compiled without a warning"
+for main in Properties wire.WireTests; do
+  java -cp java/out okay.effects.java.$main > /tmp/okay-effects-java.log 2>&1
+  ok $? "java $main: $(grep -c '^  + ' /tmp/okay-effects-java.log) tests"
+done
+java/negative.sh > /tmp/okay-effects-java-negative.log 2>&1
+ok $? "java: $(grep -c '^  + ' /tmp/okay-effects-java-negative.log) programs refused by javac"
 
 echo "== rust"
 (cd rust && cargo test > /tmp/okay-effects-rust.log 2>&1 && cargo build -q --examples)
-ok $? "rust: $(grep -c '\.\.\. ok$' /tmp/okay-effects-rust.log) tests (/tmp/okay-effects-rust.log)"
+ok $? "rust: $(grep -c '\.\.\. ok$' /tmp/okay-effects-rust.log) tests, those that must not compile among them"
 
 demo() { # the demonstration of a language, as a command
   case $1 in
@@ -31,19 +37,16 @@ demo() { # the demonstration of a language, as a command
   esac
 }
 
-compact() { sed -e 's/": /":/g' -e 's/, /,/g'; }
-
-echo "== the wire's transcript"
+echo "== the wire's transcripts"
 for far in scala java rust; do
-  grep '^> ' wire/transcript.txt | cut -c3- | $(demo $far worker) 2>/dev/null | tail -n +2 > /tmp/okay-effects-far.txt
-  grep '^< ' wire/transcript.txt | cut -c3- | compact | diff - /tmp/okay-effects-far.txt
-  ok $? "$far worker"
+  java -cp java/out okay.effects.java.wire.Transcripts $(demo $far worker) > /tmp/okay-effects-far.log 2>&1
+  ok $? "$far worker: $(grep -c '^  + ' /tmp/okay-effects-far.log) transcripts"
 done
 
 echo "== every host with every worker"
 for host in scala java rust; do
   for far in scala java rust; do
-    $(demo $host host) $(demo $far worker) 2>/dev/null | diff wire/expected.txt -
+    $(demo $host host) $(demo $far worker) 2>/dev/null | diff wire/expected.txt - > /dev/null
     ok $? "$host host, $far worker"
   done
 done
