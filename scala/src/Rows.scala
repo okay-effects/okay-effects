@@ -54,8 +54,31 @@ type Has[E[_]] = [R[_]] =>> In[E, R]
 /** EVERY EFFECT OF `R` IS IN `S`: where each is there, found by the compiler. What `into` asks, to use a program of
  * `R` as a program of `S`. At run time: the place in `S` of each place of `R`. */
 sealed abstract class Sub[R[_], S[_]]:
+  /** the place in `S` of the place `at` of `R`, with no operation in hand; null where one would be refused */
+  private[scala] def to[E[_]](at: At[E, R]): At[E, S]
+
   /** the place in `S` of the operation at `at` in `R` */
-  private[scala] def apply[E[_], X](at: At[E, R], op: E[X]): At[E, S]
+  private[scala] final def apply[E[_], X](at: At[E, R], op: E[X]): At[E, S] =
+    val there = to(at)
+    if there == null then throw NoHandler(op) else there
+
+  /** THIS, THEN `next`: for every place of `R`, its place in `T` — one renaming for two, one directly inside the
+   * other. It is as big as the row `R`, however many were composed; and one that leaves every place where it was
+   * is `Same`: the two rows are then one, and a match on it shows that to the compiler. (Only where `R` is known
+   * by no parts, after `exchanged`, the two are kept as they are.) */
+  private[scala] def andThen[T[_]](next: Sub[S, T]): Sub[R, T] = next match
+    case Sub.Same() => this
+    case _ => Sub.plain(before(next))
+
+  /** this, then `next`, as it comes: not looked at for being `Same` */
+  private[scala] def before[T[_]](next: Sub[S, T]): Sub[R, T]
+
+  /** `it`, typed by the row `R`, given back typed by `S` when this leaves every place where it was: the rows are
+   * one. Null when it does not, or when that is not known. */
+  private[scala] def itself[K[_[_]] >: Null](it: K[R]): K[S] = null
+
+  /** the same, of the places taken `down` to `S0`: `S` without its last effects, already found to be `R`'s */
+  private[scala] def under[S0[_], K[_[_]] >: Null](down: Sub.Down[S, S0], it: K[R]): K[S0] = null
 
 /** THE PLACE of `E` in `R`, `R` without it `Rest`: one of four, and its type says which effect of which row it
  * is. So two places of one row, compared, show whether their effects are one: each case of a match below tells
@@ -78,41 +101,54 @@ sealed abstract class Place[E[_], R[_], Rest[_]] extends Sub[E, R] with Split[E,
 
   /** THE OPERATION'S PLACE OUTSIDE A HANDLER that took the effect here out of the row: its place in what is left.
    * Null when the operation is at this place — the handler's own. */
-  private[scala] def outside[F[_], X](at: At[F, R], op: F[X]): At[F, Rest]
+  private[scala] def outside[F[_], X](at: At[F, R], op: F[X] | Null): At[F, Rest]
 
   /** THE OPERATION'S PLACE INSIDE: in this row, which has here one effect more than the row of `at` */
-  private[scala] def inside[F[_], X](at: At[F, Rest], op: F[X]): At[F, R]
+  private[scala] def inside[F[_], X](at: At[F, Rest], op: F[X] | Null): At[F, R]
 
   /** a place as the row of its one effect: the one place of `E` is this place of `R` */
-  private[scala] def apply[F[_], X](at: At[F, E], op: F[X]): At[F, R] = at match
+  private[scala] def to[F[_]](at: At[F, E]): At[F, R] = at match
     case Place.Only() => this
-    case _ => throw NoHandler(op)
+    case _ => null
+
+  private[scala] def before[T[_]](next: Sub[R, T]): Sub[E, T] =
+    val there = next.to(this)
+    if there == null then Sub.OfNone() else there
+
+  private[scala] override def itself[K[_[_]] >: Null](it: K[E]): K[R] = alone(it)
+
+  private[scala] override def under[S0[_], K[_[_]] >: Null](down: Sub.Down[R, S0], it: K[E]): K[S0] =
+    val there = down(this)
+    if there == null then null else there.alone(it)
 
 /** the places found: a row of one, then the last effect, then one further in — in this order, so an effect twice
  * in a row is found at its last place, the one the innermost handler takes */
 object Place extends LastPlace:
+  /** no effect is at the place: the operation is refused; with none in hand (`Sub.to`), null */
+  private def refused(op: Any): Null = if op == null then null else throw NoHandler(op)
+
   /** the one effect of a row of one */
   final case class Only[E[_]]() extends Place[E, E, Pure]:
     private[scala] def same[F[_], T[_[_]] >: Null](at: At[F, E], it: T[E]): T[F] = at match
       case Only() => it
       case _ => null
     private[scala] override def alone[T[_[_]] >: Null](it: T[E]): T[E] = it
-    private[scala] def outside[F[_], X](at: At[F, E], op: F[X]): At[F, Pure] = at match
+    private[scala] def outside[F[_], X](at: At[F, E], op: F[X] | Null): At[F, Pure] = at match
       case Only() => null
-      case _ => throw NoHandler(op)
-    private[scala] def inside[F[_], X](at: At[F, Pure], op: F[X]): At[F, E] = throw NoHandler(op)
+      case _ => refused(op)
+    private[scala] def inside[F[_], X](at: At[F, Pure], op: F[X] | Null): At[F, E] = refused(op)
 
   /** the last effect of `R + E` */
   final case class Last[R[_], E[_]]() extends Place[E, R + E, R]:
     private[scala] def same[F[_], T[_[_]] >: Null](at: At[F, R + E], it: T[E]): T[F] = at match
       case Last() => it
       case _ => null
-    private[scala] def outside[F[_], X](at: At[F, R + E], op: F[X]): At[F, R] = at match
+    private[scala] def outside[F[_], X](at: At[F, R + E], op: F[X] | Null): At[F, R] = at match
       case Last() => null
       case Init(further) => further
       case first @ First() => first.alone
-      case Only() => throw NoHandler(op)
-    private[scala] def inside[F[_], X](at: At[F, R], op: F[X]): At[F, R + E] = Init(at)
+      case Only() => refused(op)
+    private[scala] def inside[F[_], X](at: At[F, R], op: F[X] | Null): At[F, R + E] = Init(at)
 
   /** the first effect of a row of two. What is left without one of them is the row of the other alone: its
    * place there is made once, when an operation first passes a handler of the other */
@@ -129,14 +165,14 @@ object Place extends LastPlace:
       case First() => it
       case Init(Only()) => it
       case _ => null
-    private[scala] def outside[F[_], X](at: At[F, E + G], op: F[X]): At[F, G] = at match
+    private[scala] def outside[F[_], X](at: At[F, E + G], op: F[X] | Null): At[F, G] = at match
       case First() => null
       case Last() => rest
       case Init(Only()) => null
-      case _ => throw NoHandler(op)
-    private[scala] def inside[F[_], X](at: At[F, G], op: F[X]): At[F, E + G] = at match
+      case _ => refused(op)
+    private[scala] def inside[F[_], X](at: At[F, G], op: F[X] | Null): At[F, E + G] = at match
       case Only() => Last()
-      case _ => throw NoHandler(op)
+      case _ => refused(op)
 
   /** one further in than the last, `G` */
   final case class Init[E[_], R[_], G[_], Rest[_]](at: Place[E, R, Rest]) extends Place[E, R + G, Rest + G]:
@@ -149,18 +185,19 @@ object Place extends LastPlace:
       case Init(further) => at.same(further, it)
       case First() => at.alone(it)
       case _ => null
-    private[scala] def outside[F[_], X](other: At[F, R + G], op: F[X]): At[F, Rest + G] = other match
+    private[scala] def outside[F[_], X](other: At[F, R + G], op: F[X] | Null): At[F, Rest + G] = other match
       case Last() => last
       case Init(further) =>
         val beyond = at.outside(further, op)
         if beyond == null then null else Init(beyond)
-      case First() => if at.alone[[H[_]] =>> At[H, R]](at) != null then null else throw NoHandler(op)
-      case Only() => throw NoHandler(op)
-    private[scala] def inside[F[_], X](other: At[F, Rest + G], op: F[X]): At[F, R + G] = other match
+      case First() => if at.alone[[H[_]] =>> At[H, R]](at) != null then null else refused(op)
+      case Only() => refused(op)
+    private[scala] def inside[F[_], X](other: At[F, Rest + G], op: F[X] | Null): At[F, R + G] = other match
       case Last() => Last()
-      case Init(further) => Init(at.inside(further, op))
-      case First() => Init(at.inside(Only(), op))
-      case Only() => throw NoHandler(op)
+      case Init(further) => deeper(at.inside(further, op))
+      case First() => deeper(at.inside(Only(), op))
+      case Only() => refused(op)
+    private def deeper[F[_]](in: At[F, R]): At[F, R + G] = if in == null then null else Init(in)
 
   /** the one effect of a row of one */
   given only[E[_]]: Place[E, E, Pure] = Only()
@@ -194,23 +231,66 @@ trait SplitMissing:
 object Sub extends SubMore:
   /** the same row: every place where it is */
   final case class Same[R[_]]() extends Sub[R, R]:
-    private[scala] def apply[E[_], X](at: At[E, R], op: E[X]): At[E, R] = at
+    private[scala] def to[E[_]](at: At[E, R]): At[E, R] = at
+    private[scala] override def andThen[T[_]](next: Sub[R, T]): Sub[R, T] = next
+    private[scala] def before[T[_]](next: Sub[R, T]): Sub[R, T] = next
+    private[scala] override def itself[K[_[_]] >: Null](it: K[R]): K[R] = it
 
   /** a row no operation is of: its programs ask nothing, and are programs of any row. An operation that comes
    * all the same — a row was written where an effect is meant — is refused */
   final class OfNone[R[_], S[_]] extends Sub[R, S]:
-    private[scala] def apply[E[_], X](at: At[E, R], op: E[X]): At[E, S] = throw NoHandler(op)
+    private[scala] def to[E[_]](at: At[E, R]): At[E, S] = null
+    private[scala] def before[T[_]](next: Sub[S, T]): Sub[R, T] = OfNone()
 
   /** `R + E`: `E`'s place, and `R`'s places */
   final class More[R[_], E[_], S[_]](r: Sub[R, S], e: At[E, S]) extends Sub[R + E, S]:
-    private[scala] def apply[F[_], X](at: At[F, R + E], op: F[X]): At[F, S] = more(r, e, at, op)
+    private[scala] def to[F[_]](at: At[F, R + E]): At[F, S] = more(r, e, at)
+    private[scala] def before[T[_]](next: Sub[S, T]): Sub[R + E, T] =
+      More(r.before(next), if e == null then null else next.to(e))
+    private[scala] override def itself[K[_[_]] >: Null](it: K[R + E]): K[S] = under(Whole[S](), it)
+    private[scala] override def under[S0[_], K[_[_]] >: Null](down: Down[S, S0], it: K[R + E]): K[S0] =
+      if e == null then null else last[R, E, S, S0, K](r, down(e), down, it)
 
-  private def more[R[_], E[_], S[_], F[_], X](r: Sub[R, S], e: At[E, S], at: At[F, R + E], op: F[X]): At[F, S] =
+  /** `E` is the last effect there too, and `R` is what is before it */
+  private def last[R[_], E[_], S[_], S0[_], K[_[_]] >: Null](r: Sub[R, S], e: At[E, S0], down: Down[S, S0],
+      it: K[R + E]): K[S0] = e match
+    case _: Place.Last[t, e] => r.under[t, [X[_]] =>> K[X + e]](Before[S, t, e](down), it)
+    case _ => null
+
+  private def more[R[_], E[_], S[_], F[_]](r: Sub[R, S], e: At[E, S], at: At[F, R + E]): At[F, S] =
     at match
       case Place.Last() => e
-      case Place.Init(further) => r(further, op)
-      case first @ Place.First() => r(first.alone, op)
-      case Place.Only() => throw NoHandler(op)
+      case Place.Init(further) => r.to(further)
+      case first @ Place.First() => r.to(first.alone)
+      case Place.Only() => null
+
+  /** a renaming, then another, kept as two: the first's row is known by no parts (`Exchanged`) */
+  final class Both[R[_], S[_], T[_]](first: Sub[R, S], second: Sub[S, T]) extends Sub[R, T]:
+    private[scala] def to[E[_]](at: At[E, R]): At[E, T] =
+      val between = first.to(at)
+      if between == null then null else second.to(between)
+    private[scala] def before[U[_]](next: Sub[T, U]): Sub[R, U] = Both(first, second.andThen(next))
+
+  /** a renaming that leaves every place where it was is `Same` */
+  private def plain[R[_], S[_]](sub: Sub[R, S]): Sub[R, S] =
+    val same = sub.itself[[X[_]] =>> Sub[R, X]](Same[R]())
+    if same == null then sub else same
+
+  /** A PLACE OF `S`, IN `S` WITHOUT ITS LAST EFFECTS, `T`: null when it is of one of those. How a renaming is
+   * found to leave a row as it was, an effect at a time from the last — each step typed, no row compared. */
+  sealed abstract class Down[S[_], T[_]]:
+    def apply[F[_]](at: At[F, S]): At[F, T]
+
+  final class Whole[S[_]] extends Down[S, S]:
+    def apply[F[_]](at: At[F, S]): At[F, S] = at
+
+  final class Before[S[_], T[_], G[_]](down: Down[S, T + G]) extends Down[S, T]:
+    def apply[F[_]](at: At[F, S]): At[F, T] = before[T, G, F](down(at))
+
+  private def before[T[_], G[_], F[_]](at: At[F, T + G]): At[F, T] = at match
+    case Place.Init(further) => further
+    case first @ Place.First() => first.alone
+    case _ => null
 
   given same[R[_]]: Sub[R, R] = Same()
 
@@ -222,10 +302,13 @@ object Sub extends SubMore:
   final class Exchanged[E[_], G[_], R[_], S[_], Rest[_]](e: Place[E, R, Rest], g: Place[G, S, Rest])
       extends Sub[R, S + E]:
     private val last = Place.Last[S, E]()
-    private[scala] def apply[F[_], X](at: At[F, R], op: F[X]): At[F, S + E] =
-      val rest = e.outside(at, op)
+    private[scala] def to[F[_]](at: At[F, R]): At[F, S + E] =
+      val rest = e.outside(at, null)
       if rest == null then e.same[F, [H[_]] =>> At[H, S + E]](at, last)
-      else Place.Init(g.inside(rest, op))
+      else
+        val in = g.inside(rest, null)
+        if in == null then null else Place.Init(in)
+    private[scala] def before[T[_]](next: Sub[S + E, T]): Sub[R, T] = Both(this, next)
 
 trait SubMore extends SubOne:
   given pure[S[_]]: Sub[Pure, S] = Sub.OfNone()

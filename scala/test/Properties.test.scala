@@ -716,3 +716,169 @@ class Properties extends munit.FunSuite:
     assertEquals((levels(before(1000)), levels(before(2000))), (2, 2))
     assertEquals((levels(after(1000)), levels(after(2000))), (2, 2))
     assertEquals((levels(among(1000)), levels(among(2000))), (1, 1))
+
+  // ---- calls in tail position from row to row: each puts the program called into the caller's row
+
+  type Forth[X] = (State % Int + Emit % Int)[X]
+  type Back[X] = (Emit % Int + State % Int)[X]
+
+  /** `n` is sent, and added to the state */
+  def sent[R[_]: Has[Emit % Int]: Has[State % Int]](n: Int): Unit ! R =
+    Emit.send(n).flatMap(_ => State.modify((s: Int) => s + n))
+
+  def ping(n: Int): Unit ! Forth = if n == 0 then unit else sent[Forth](n).flatMap(_ => pong(n - 1))
+  def pong(n: Int): Unit ! Back = if n == 0 then unit else sent[Back](n).flatMap(_ => ping(n - 1))
+
+  /** the same, the row said by `into` */
+  def pingInto(n: Int): Unit ! Forth = if n == 0 then unit else sent[Forth](n).flatMap(_ => pongInto(n - 1).into[Forth])
+  def pongInto(n: Int): Unit ! Back = if n == 0 then unit else sent[Back](n).flatMap(_ => pingInto(n - 1).into[Back])
+
+  /** the state's handler outside the one that counts the levels: the state at the end, and the most levels */
+  def outside(p: Unit ! Forth): (Int, Int) = run(State.run(0)(resumed(p)))
+
+  /** the state's handler inside it: a level of every continuation */
+  def inside(p: Unit ! Forth): (Int, Int) =
+    var state = 0
+    (run(resumed(State.run(0)(p).map((s, _) => state = s))), state).swap
+
+  /** as an `Int` state has it */
+  def sum(n: Int): Int = (n.toLong * (n + 1) / 2).toInt
+
+  test("calls in tail position between two orders of one row keep one level, however many: ping and pong"):
+    // the handler, and in `pong` the level that renames; `ping` called from there is under the handler alone
+    assertEquals((outside(ping(1000)), outside(ping(2000))), ((sum(1000), 2), (sum(2000), 2)))
+    assertEquals((outside(pingInto(1000)), outside(pingInto(2000))), ((sum(1000), 2), (sum(2000), 2)))
+    assertEquals(outside(ping(1_000_000)), (sum(1_000_000), 2))
+
+  test("calls in tail position between two orders of one row, a state's handler inside: nothing passes it"):
+    assertEquals((inside(ping(1000)), inside(ping(2000))), ((sum(1000), 3), (sum(2000), 3)))
+    assertEquals((inside(pingInto(1000)), inside(pingInto(2000))), ((sum(1000), 3), (sum(2000), 3)))
+    assertEquals(inside(ping(1_000_000)), (sum(1_000_000), 3))
+    // a handler entered between two calls: its level stays between their two, and each renames its own row
+    type Read[X] = (Emit % Int + Reader % Int + State % Int)[X]
+    def read(n: Int): Unit ! Read = Reader.ask[Int].flatMap(r => sent[Read](n * r)).flatMap(_ => pong(n - 1))
+    def answered(n: Int): Unit ! Back = Reader.run(10)(read(n))
+    def under(n: Int): Unit ! Forth = sent[Forth](n).flatMap(_ => answered(n - 1))
+    assertEquals(outside(under(1000)), (1000 + 9990 + sum(998), 4))
+
+  test("calls in tail position round three rows keep one level, however many"):
+    type One[X] = (State % Int + Emit % Int + Reader % Int)[X]
+    type Two[X] = (Emit % Int + Reader % Int + State % Int)[X]
+    type Three[X] = (Reader % Int + State % Int + Emit % Int)[X]
+    def one(n: Int): Unit ! One =
+      if n == 0 then unit else Reader.ask[Int].flatMap(r => sent[One](n * r)).flatMap(_ => two(n - 1))
+    def two(n: Int): Unit ! Two =
+      if n == 0 then unit else Reader.ask[Int].flatMap(r => sent[Two](n * r)).flatMap(_ => three(n - 1))
+    def three(n: Int): Unit ! Three =
+      if n == 0 then unit else Reader.ask[Int].flatMap(r => sent[Three](n * r)).flatMap(_ => one(n - 1))
+    def round(n: Int): (Int, Int) = run(Reader.run(2)(State.run(0)(resumed(one(n)))))
+    assertEquals((round(1000), round(2000)), ((2 * sum(1000), 2), (2 * sum(2000), 2)))
+    assertEquals(round(1_000_000), (2 * sum(1_000_000), 2))
+
+  test("a continuation taken in the middle of calls from row to row is resumed twice: each path goes on"):
+    type Swapped[X] = (Choose + State % Int)[X]
+    def add[R[_]: Has[Choose]: Has[State % Int]](n: Int): Unit ! R =
+      if n == 500 then Choose.among(10, 20).flatMap(x => State.modify((s: Int) => s + x))
+      else State.modify((s: Int) => s + 1)
+    def flip(n: Int): Int ! Chosen = if n == 0 then State.get else add[Chosen](n).flatMap(_ => flop(n - 1))
+    def flop(n: Int): Int ! Swapped = if n == 0 then State.get else add[Swapped](n).flatMap(_ => flip(n - 1))
+    // each path its own state; or one state through both: the second goes on from where the first ended
+    assertEquals(run(Choose.all(State.run(0)(flip(1000)))), List((1009, 1009), (1019, 1019)))
+    assertEquals(run(State.run(0)(Choose.all(flip(1000)))), (1528, List(1009, 1528)))
+    assertEquals(run(Choose.all(State.run(0)(flop(999)))), List((1008, 1008), (1018, 1018)))
+    assertEquals(run(State.run(0)(Choose.all(flop(1001)))), (1529, List(1010, 1529)))
+
+  test("ensuring in calls from row to row: every finalizer runs once, in order; at a failure too"):
+    type Failed[X] = (Emit % Int + Throws % String + State % Int)[X]
+    type Turned[X] = (State % Int + Throws % String + Emit % Int)[X]
+    def here(n: Int): Unit ! Failed =
+      if n == 0 then Throws.raise("end") else sent[Failed](n).ensuring(said(s"$n")).flatMap(_ => there(n - 1))
+    def there(n: Int): Unit ! Turned =
+      if n == 0 then Throws.raise("end") else sent[Turned](n).ensuring(said(s"$n")).flatMap(_ => here(n - 1))
+    def ran(n: Int): ((Int, Either[String, Int]), List[String]) =
+      logged(run(State.run(0)(Throws.run(resumed(here(n))))))
+    def closed(n: Int): List[String] = (n to 1 by -1).map(_.toString).toList
+    assertEquals(ran(1000), ((sum(1000), Left("end")), closed(1000)))
+    assertEquals(ran(2000), ((sum(2000), Left("end")), closed(2000)))
+    // the call itself under a finalizer: that one waits, a frame for every call, and they run the last first
+    def kept(n: Int): Unit ! Failed = if n == 0 then Throws.raise("end") else lost(n - 1).ensuring(said(s"$n"))
+    def lost(n: Int): Unit ! Turned = if n == 0 then Throws.raise("end") else kept(n - 1).ensuring(said(s"$n"))
+    val left = logged(run(State.run(0)(Throws.run(resumed(kept(1000))))))
+    assertEquals(left, ((0, Left("end")), closed(1000).reverse))
+
+  /** a program stepped from outside, each rest resumed where something waits for its value: a count of the turns,
+   * and at every `asks`-th a send that the same loop answers. The values sent, the count, the most levels. */
+  def waited(p: Unit ! Sends, asks: Int = 0): (Int, Int, Int) =
+    var (sent, turns, most, done) = (0, 0, 0, 0)
+    def turn(next: Unit ! Sends): Unit ! Sends = step(next) match
+      case asked: Step.Asked[Sends, ?, ?, Unit] =>
+        most = most.max(asked.k.levels)
+        asked.of[Emit % Int] match
+          case Some(the) => the.op match
+            case Emit.Send(value) =>
+              sent += value
+              turns += 1
+              val after = turns
+              the.k(()).flatMap: _ =>
+                done += 1
+                assertEquals(done, after, "of what waits, the first to wait runs first")
+                if asks > 0 && after % asks == 0 then Emit.send(0) else unit
+          case _ => fail("a send was expected")
+      case _ => null
+    var next = turn(p)
+    while next != null do next = turn(next)
+    (sent, done, most)
+
+  test("a program stepped and resumed where something waits: one level, and a frame for every turn"):
+    assertEquals(waited(numbers(1000)), (sum(1000), 1000, 1))
+    assertEquals(waited(numbers(2000)), (sum(2000), 2000, 1))
+    // what waits sends too, at the end, and is itself waited for: every third of all the turns
+    assertEquals(waited(numbers(1000), asks = 3), (sum(1000), 1499, 1))
+    assertEquals(waited(numbers(2000), asks = 3), (sum(2000), 2999, 1))
+    assertEquals(waited(numbers(200_000)), (sum(200_000), 200_000, 1))
+    // under a handler, with a call from row to row at every turn
+    def counted(n: Int): Unit ! Sends = State.run(0)(ping(n)).map((s, _) => assertEquals(s, sum(n)))
+    assertEquals(waited(counted(1000)), (sum(1000), 1000, 3))
+    assertEquals(waited(counted(2000)), (sum(2000), 2000, 3))
+
+  /** the rest of a program that stopped at a send */
+  def sending(at: Step[Sends, Unit]): Option[Continuation[Unit, Sends, Unit]] = at match
+    case asked: Step.Asked[Sends, ?, ?, Unit] => asked.of[Emit % Int].map(the => answered(the.op, the.k))
+    case _ => None
+
+  def answered[X](op: Emit[Int, X], k: Continuation[X, Sends, Unit]): Continuation[Unit, Sends, Unit] = op match
+    case Emit.Send(_) => k
+
+  test("a program stepped and resumed where something waits: its rest resumed twice, and unwound"):
+    def held(n: Int): Unit ! Sends = sending(step(numbers[Sends](n))) match
+      case Some(k) => k(()).flatMap(_ => said(s"after $n")).ensuring(said(s"closed $n"))
+      case _ => unit
+    def turns(p: Unit ! Sends, n: Int): Option[Continuation[Unit, Sends, Unit]] = sending(step(p)) match
+      case Some(k) if n > 0 => turns(k(()).ensuring(said(s"turn $n")), n - 1)
+      case other => other
+    turns(held(4), 2) match
+      case Some(k) =>
+        assertEquals(k.levels, 1)
+        val ends = List("after 4", "closed 4", "turn 2", "turn 1")
+        assertEquals(logged(step(k(()))), (Step.Done[Sends, Unit](()), ends))
+        assertEquals(logged(step(k(()))), (Step.Done[Sends, Unit](()), ends))
+        assertEquals(logged(step(k.unwind)), (Step.Done[Sends, Unit](()), ends.tail))
+      case _ => fail("an operation was expected")
+
+  test("a program put into a row, and that into another, with nothing between: one renaming, of the two"):
+    // two states into one, and that into two again: both are the last one now, and it is no row left as it was
+    val two: (Int, Int) ! Twice = both[Twice](using Place.last, Place.init)
+    assertEquals(run(State.run(0)(State.run(0)(two))), (0, (1, (1, 0))))
+    val one: (Int, Int) ! Twice = two.into[Counter].into[Twice]
+    assertEquals(run(State.run(0)(State.run(0)(one))), (0, (10, (10, 10))))
+    // after a renaming made by hand (`Sub.exchanged`), whose row is known by no parts: the two are kept
+    type Shown[X] = (State % Int + Emit % String)[X]
+    type Turned[X] = (Emit % Int + Emit % String + State % Int)[X]
+    val exchanged = Sub.exchanged[Emit % Int, Emit % String, Forth, Shown, State % Int](summon, summon)
+    val turned: Unit ! Turned = ping(1000).into(using exchanged).into[Turned]
+    val ints: (List[Int], Unit) ! Emit % String + State % Int = Emit.collect(turned)
+    val strings: (List[String], (List[Int], Unit)) ! State % Int = Emit.collect(ints)
+    assertEquals(run(State.run(0)(strings)), (sum(1000), (Nil, ((1000 to 1 by -1).toList, ()))))
+    // and under a stream mapped, which puts its program into a row so
+    val doubled: Unit ! Forth = Emit.map((x: Int) => x * 2)(ping(100_000))
+    assertEquals(outside(doubled), (sum(100_000), 1))

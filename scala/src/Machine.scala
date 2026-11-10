@@ -8,7 +8,8 @@ import scala.annotation.tailrec
  *   Bind       a frame is pushed
  *   Done       the top frame takes the value; no frame left — the handler's `ret`, and the level is popped
  *   Handle     a new level
- *   Embedded   a new level, of no handler: it renames
+ *   Embedded   a new level, of no handler: it renames. In tail position under a level that renames, no new
+ *              level: that one renames for both
  *   Ask        the handler of the operation's place is found. In place: it answers, the loop goes on with the
  *              answer — nothing is allocated. General: the levels above and at the handler are taken off as `k`,
  *              and the clause runs below them
@@ -44,6 +45,9 @@ private[scala] object Machine:
   final class Unwinding[R[_], Y, V](val rest: Frames[R, Y, V], val to: AnyRef) extends Frames[R, Any, V]
   /** the end of an unwinding: `()` to what waits for it */
   final class Unwound[R[_], V](val rest: Frames[R, Unit, V]) extends Frames[R, Any, V]
+  /** frames, and those that waited outside them: what was two levels, one put back on the other (`onto`). A value
+   * that comes here finds them two again */
+  final class After[R[_], X, Y, V](val first: Frames[R, X, Y], val rest: Frames[R, Y, V]) extends Frames[R, X, V]
 
   /** how a handler of `E` meets the operations of its row `R`: it took its effect out — outside is the row
    * without it — or it kept it there */
@@ -114,23 +118,23 @@ private[scala] object Machine:
       Renamed(sub, Unwinding(outside, to), under)
 
   /** A LEVEL THAT RENAMES, PUT ON `below` — a level a continuation took, or the one that stands for the rest of a
-   * whole run (`Whole`). When nothing waits between it and a level under it that renames nothing — the rest of a
-   * run resumed where a run ends — the two are one level, and that one is not kept: so a program stepped and
-   * resumed in a loop, however long, is under one such level, and not under one for every turn. */
+   * whole run (`Whole`). On a level that renames too, the two are one (`onto`): so a program stepped and resumed
+   * in a loop, however long, is under one such level, and not under one for every turn. */
   private def renaming[R[_], S[_], A, W, P[_], Z](sub: Sub[R, S], outside: Frames[S, A, W],
-      below: Level[S, W, P, Z]): Level[R, A, P, Z] = outside match
-    case _: End[?, ?] => below match
-      case lower: Renamed[s, t, ?, w, p, ?] => onto[R, s, t, A, w, p, Z](sub, lower.sub, lower.outside, lower.below)
-      case _ => Renamed(sub, outside, below)
+      below: Level[S, W, P, Z]): Level[R, A, P, Z] = below match
+    case lower: Renamed[s, t, ?, w, p, ?] => onto[R, s, t, A, W, w, p, Z](sub, outside, lower)
     case _ => Renamed(sub, outside, below)
 
-  /** the level of `sub` over that of `lower`, nothing between them: the one that renames, when the other does not */
-  private def onto[R[_], S[_], T[_], A, W, P[_], Z](sub: Sub[R, S], lower: Sub[S, T], outside: Frames[T, A, W],
-      below: Level[T, W, P, Z]): Level[R, A, P, Z] = lower match
-    case Sub.Same() => Renamed[R, S, A, W, P, Z](sub, outside, below)
-    case _ => sub match
-      case Sub.Same() => Renamed[R, T, A, W, P, Z](lower, outside, below)
-      case _ => Renamed[R, S, A, A, P, Z](sub, End[S, A](), Renamed[S, T, A, W, P, Z](lower, outside, below))
+  /** the level of `sub` on `lower`, which renames too. Nothing waits between them: one level, of the two renamings
+   * composed. Frames wait between, and `lower` renames nothing: one level, the frames one after the other — the
+   * rest of a run resumed where something waits for its value (`k(x).flatMap(f)`, by whoever steps it). Else they
+   * are two: the frames between are of a row that `lower` renames. */
+  private def onto[R[_], S[_], T[_], A, V, W, P[_], Z](sub: Sub[R, S], between: Frames[S, A, V],
+      lower: Renamed[S, T, V, W, P, Z]): Level[R, A, P, Z] = between match
+    case _: End[?, ?] => Renamed[R, T, A, W, P, Z](sub.andThen(lower.sub), lower.outside, lower.below)
+    case _ => lower.sub match
+      case Sub.Same() => Renamed[R, S, A, W, P, Z](sub, After[S, A, V, W](between, lower.outside), lower.below)
+      case _ => Renamed[R, S, A, V, P, Z](sub, between, lower)
 
   /** WHERE A GENERAL HANDLER WAS, while its `k` is unwound: the handler has left, and answers nothing. An
    * operation of its place that a finalizer asks goes outside if the handler kept its effect in the row
@@ -252,7 +256,7 @@ private[scala] object Machine:
       case inPlace: Handler.Stateful[`e`, `out`, `a`, `b`, s] =>
         val under = InPlace[e, r, out, a, b, s, V, P, Z](handle.way, inPlace, frames, level, inPlace.init)
         loop[r, a, a, P, Z](handle.body, End[r, a](), under)
-    case embedded: Comp.Embedded[r, s, a] =>
+    case embedded: Comp.Embedded[r, s, a] if !frames.isInstanceOf[End[?, ?]] =>
       loop[r, a, a, P, Z](embedded.body, End[r, a](), Renamed[r, s, a, V, P, Z](embedded.sub, frames, level))
     case resume: Comp.Resume[r0, v0, x, r, a] =>
       val k: K[r0, v0, x, r, a] = resume.k
@@ -266,12 +270,14 @@ private[scala] object Machine:
 
   /** THE TURNS OF LEAVING, apart from the loop, which they do not slow.
    *
+   *   Embedded   in tail position — no frame waits for its value (`entering`)
    *   Ensure     a frame that holds the finalizer
    *   Unwind     the levels of `k` are put back over the end of the unwinding — what waited for it — and unwound
    *   Done       at a finalizer's frame: the finalizer runs, and the value waits for it. At a frame of an
    *              unwinding: the value is dropped, and the unwinding goes on, or ends */
   private def leaving[R[_], X, V, P[_], Z](c: Comp[R, X], frames: Frames[R, X, V], level: Level[R, V, P, Z])
       : Next[P, Z] = c match
+    case embedded: Comp.Embedded[r, s, a] => entering[r, s, a, V, P, Z](embedded.sub, embedded.body, frames, level)
     case ensure: Comp.Ensure[r, x] => Go[r, x, V, P, Z](ensure.body, Finally[r, x, V](ensure.finalizer, frames), level)
     case unwind: Comp.Unwind[r0, v0, x, r, b] =>
       val k: K[r0, v0, x, r, b] = unwind.k
@@ -282,7 +288,39 @@ private[scala] object Machine:
         Go[r, Any, V, P, Z](last.finalizer(), Then[r, Any, X, V](_ => c, last.rest), level)
       case on: Unwinding[r, y, ?] => walk[r, y, V, P, Z](on.rest, level, on.to)
       case end: Unwound[r, ?] => Go[r, Unit, V, P, Z](Comp.Done[r, Unit](()), end.rest, level)
+      case both: After[r, ?, y, ?] => lean[r, X, y, V](both.first, both.rest) match
+        case two: After[r2, ?, y2, ?] => Go[r2, X, y2, P, Z](c, two.first, apart[r2, y2, V, P, Z](two.rest, level))
       case _ => Go[R, X, V, P, Z](c, frames, level)
+
+  /** frames after frames, the first of them no such pair: of a loop's turns, each put after the last, the first
+   * turn's are found once, and what is behind them is in the order it will be wanted in */
+  @tailrec
+  private def lean[R[_], X, Y, V](first: Frames[R, X, Y], rest: Frames[R, Y, V]): After[R, X, ?, V] = first match
+    case inner: After[r, ?, y, ?] => lean[R, X, y, V](inner.first, After[R, y, Y, V](inner.rest, rest))
+    case _ => After[R, X, Y, V](first, rest)
+
+  /** the frames that waited outside others (`After`), outside a level again: one that renames nothing */
+  private def apart[R[_], Y, V, P[_], Z](rest: Frames[R, Y, V], level: Level[R, V, P, Z]): Level[R, Y, P, Z] =
+    Renamed[R, R, Y, V, P, Z](Sub.Same(), rest, level)
+
+  /** A PROGRAM OF THE ROW `R` ENTERED IN TAIL POSITION of one of `S`: no frame waits for its value. Under a level
+   * that renames, it needs none of its own: that level renames for both, by the two renamings composed — and when
+   * they leave every place where it was (a call that comes back to the row it began in), the program runs with no
+   * level, as what was under that one. So calls in tail position from row to row, however many, keep one level.
+   * Under a handler's level, or the run's, it has its own: nothing is composed across a handler. */
+  private def entering[R[_], S[_], A, V, P[_], Z](sub: Sub[R, S], body: Comp[R, A], frames: Frames[S, A, V],
+      level: Level[S, V, P, Z]): Next[P, Z] = frames match
+    case _: End[?, ?] => level match
+      case lower: Renamed[s, t, ?, w, p, ?] =>
+        renamed[R, t, A, w, p, Z](sub.andThen(lower.sub), body, lower.outside, lower.below)
+      case _ => Go[R, A, A, P, Z](body, End[R, A](), Renamed[R, S, A, V, P, Z](sub, frames, level))
+    case _ => Go[R, A, A, P, Z](body, End[R, A](), Renamed[R, S, A, V, P, Z](sub, frames, level))
+
+  /** `body` under the level of `sub`; under none, when `sub` renames nothing */
+  private def renamed[R[_], T[_], A, W, P[_], Z](sub: Sub[R, T], body: Comp[R, A], outside: Frames[T, A, W],
+      below: Level[T, W, P, Z]): Next[P, Z] = sub match
+    case Sub.Same() => Go[T, A, W, P, Z](body, outside, below)
+    case _ => Go[R, A, A, P, Z](body, End[R, A](), Renamed[R, T, A, W, P, Z](sub, outside, below))
 
   /** UNWINDING, to its end `to`: the frames are passed with no value. A finalizer's frame: the finalizer runs, and
    * the unwinding goes on after it (`Unwinding`). The end of a level's frames: the level is left without its
@@ -298,6 +336,8 @@ private[scala] object Machine:
       case end: Unwound[r, ?] =>
         if end eq to then Go[r, Unit, V, P, Z](Comp.Done[r, Unit](()), end.rest, level)
         else walk[r, Unit, V, P, Z](end.rest, level, to)
+      case both: After[r, x, y, ?] => lean[r, x, y, V](both.first, both.rest) match
+        case two: After[r2, x2, y2, ?] => walk[r2, x2, y2, P, Z](two.first, apart[r2, y2, V, P, Z](two.rest, level), to)
       case _: End[?, ?] => level match
         case general: General[?, ?, out, ?, b, w, p, ?] => walk[out, b, w, p, Z](general.outside, general.below, to)
         case in: InPlace[?, ?, out, ?, b, ?, w, p, ?] => walk[out, b, w, p, Z](in.outside, in.below, to)
