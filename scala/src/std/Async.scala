@@ -29,8 +29,8 @@ object Async:
   /** the program started; `done` is called with its value, now or later. Returns as soon as the program waits. */
   def start[A](p: A ! Async)(done: A => Unit): Unit =
     val turns = Turns()
-    val handler = Handler.general[Async, Pure, A, Unit](a => pure(done(a)))(
-      [X] => (op: Async[X], k: X => Unit ! Pure) => op match
+    val handler = Handler.control[Async, Pure, A, Unit](a => pure(done(a)))(
+      [X] => (op: Async[X], k: Continuation[X, Pure, Unit]) => op match
         case Await(register) => pure(register(x => turns.take(() => run(k(x))))))
     turns.take(() => run(handle(p, handler)))
 

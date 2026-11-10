@@ -469,3 +469,189 @@ class Properties extends munit.FunSuite:
     type Turned[X] = (Writer % String + State % Int + Reader % String + Reader % Int)[X]
     assertEquals(run(Reader.run("x")(Writer.run(Reader.run(2)(State.run(1)(p.into[Turned]))))), (List("xx"), (3, 1)))
     assertEquals(run(State.run(1)(Reader.run(2)(Reader.run("x")(Writer.run(p.into[Turned]))))), (3, (List("xx"), 1)))
+
+  // ---- a finalizer runs when a part of a program is left: with its value, or unwound
+
+  type Failing[X] = (State % Int + Throws % String)[X]
+
+  private var log = List.empty[String]
+
+  /** `what` is written down when this program runs */
+  def said[R[_]](what: String): Unit ! R = defer(pure { log ::= what })
+
+  /** a result, and what was said on the way, in order */
+  def logged[A](result: => A): (A, List[String]) =
+    log = Nil
+    val a = result
+    (a, log.reverse)
+
+  test("ensuring, a value: the finalizer runs after the program, and the program's value is the result"):
+    val p: Int ! Pure = said("body").map(_ => 1).ensuring(said("closed").map(_ => 2))
+    assertEquals(logged(run(p)), (1, List("body", "closed")))
+    // a finalizer is made when it runs: building the program runs nothing
+    log = Nil
+    val built: Int ! Pure = pure[Int, Pure](1).ensuring(pure { log ::= "closed" })
+    assertEquals(log, Nil)
+    assertEquals(logged(run(built)), (1, List("closed")))
+
+  test("ensuring, a failure: the finalizer runs before the failure is answered"):
+    val p: Int ! Throws % String = ensuring(said("body").flatMap(_ => Throws.raise("no")))(said("closed"))
+    val rescued = Throws.recover((e: String) => said(s"rescued $e").map(_ => 0))(p)
+    assertEquals(logged(run(rescued)), (0, List("body", "closed", "rescued no")))
+    assertEquals(logged(run(Throws.run(p))), (Left("no"), List("body", "closed")))
+
+  test("ensuring, a handler's abort: any handler made by `Handler.abort` unwinds what it leaves"):
+    val p: Int ! Account = ensuring(Account.deposit(1))(said("closed"))
+    val refused = handle(p, Handler.abort[Account, Pure, Int, Int](pure)([X] => (_: Account[X]) => pure(-1)))
+    assertEquals(logged(run(refused)), (-1, List("closed")))
+
+  test("ensuring, the first of the choices: a path with no value is unwound, a path not begun holds nothing"):
+    def path(x: Int): Int ! Choose =
+      ensuring(said(s"open $x").flatMap(_ => if x == 1 then Choose.none[Int] else pure(x)))(said(s"closed $x"))
+    val p: Int ! Choose = Choose.among(1, 2, 3).flatMap(path)
+    assertEquals(logged(run(Choose.first(p))), (Some(2), List("open 1", "closed 1", "open 2", "closed 2")))
+
+  test("ensuring, a stream cut short: the producer is unwound where it stopped"):
+    def from[R[_]: Has[Emit % Int]](n: Int): Nothing ! R = Emit.send(n).flatMap(_ => from(n + 1))
+    val cut = Emit.take(2)(from[Emit % Int](0).ensuring(said("closed")))
+    assertEquals(logged(run(Emit.collect(cut))), ((List(0, 1), ()), List("closed")))
+    // what a finalizer sends when the stream is cut goes to the stream's handler: the cut has left
+    val last = Emit.take(2)(from[Emit % Int](0).ensuring(Emit.send(-1)))
+    assertEquals(run(Emit.collect(last))._1, List(0, 1, -1))
+    assertEquals(Emit.pull(Emit.take(2)(from[Emit % Int](0).ensuring(Emit.send(-1)))).toList, List(0, 1, -1))
+
+  test("ensuring, every path of a choice: a finalizer after the choice runs once in each path"):
+    def path(x: Int): Int ! Choose =
+      ensuring(if x == 2 then Choose.none[Int] else pure(x * 10))(said(s"closed $x"))
+    val p: Int ! Choose = Choose.among(1, 2, 3).flatMap(path)
+    assertEquals(logged(run(Choose.all(p))), (List(10, 30), List("closed 1", "closed 2", "closed 3")))
+
+  test("ensuring, every path of a choice: a finalizer before the choice runs once for each path that passes it"):
+    val chosen: Int ! Choose = Choose.among(1, 2, 3).flatMap(x => said(s"path $x").map(_ => x))
+    val p: Int ! Choose = chosen.ensuring(said("closed")).flatMap(x => if x == 2 then Choose.none else pure(x))
+    val told = List("path 1", "closed", "path 2", "closed", "path 3", "closed")
+    assertEquals(logged(run(Choose.all(p))), (List(1, 3), told))
+
+  test("ensuring, nested: the innermost finalizer first, at a value and at a failure"):
+    val ended: Int ! Throws % String = pure[Int, Throws % String](1).ensuring(said("inner")).ensuring(said("outer"))
+    assertEquals(logged(run(Throws.run(ended))), (Right(1), List("inner", "outer")))
+    val raised: Int ! Throws % String = Throws.raise("no")
+    val failed = raised.ensuring(said("inner")).flatMap(_ => said("not run").map(_ => 2)).ensuring(said("outer"))
+    assertEquals(logged(run(Throws.run(failed))), (Left("no"), List("inner", "outer")))
+
+  test("ensuring, state: a finalizer reads and writes the state as its path left it, inside the handler or outside"):
+    val saw: Unit ! Failing = State.get[Int].flatMap(s => said(s"saw $s").flatMap(_ => State.put(s + 1)))
+    val failing: Int ! Failing = State.put(5).flatMap(_ => Throws.raise("no"))
+    val p = failing.ensuring(saw)
+    // the state inside the handler that leaves: it is in what is unwound, and is dropped after the finalizer
+    assertEquals(logged(run(Throws.run(State.run(0)(p)))), (Left("no"), List("saw 5")))
+    // the state outside it: what the finalizer wrote stays
+    assertEquals(logged(run(State.run(0)(Throws.run(p)))), ((6, Left("no")), List("saw 5")))
+    // each path of a choice has the state it left
+    type Paths[X] = (Choose + State % Int)[X]
+    val seen: Unit ! Paths = State.get[Int].flatMap(s => said(s"saw $s"))
+    def ended(x: Int): Int ! Paths = State.put(x).flatMap(_ => Choose.none)
+    val q: Int ! Paths = Choose.among(1, 2).flatMap(x => ended(x).ensuring(seen))
+    assertEquals(logged(run(Choose.all(State.run(0)(q)))), (Nil, List("saw 1", "saw 2")))
+
+  test("ensuring, a finalizer that fails at a value: the failure is the result, and what waits outside is unwound"):
+    val one: Int ! Throws % String = pure(1)
+    val p = one.ensuring(Throws.raise("closing")).ensuring(said("outer"))
+    assertEquals(logged(run(Throws.run(p))), (Left("closing"), List("outer")))
+
+  test("ensuring, a finalizer that fails in an unwinding: the unwinding goes on, the failure goes to its handler"):
+    type Two[X] = (Throws % Int + Throws % String)[X]
+    val failing: Int ! Two = Throws.raise("no")
+    val closing: Unit ! Two = Throws.raise(7).flatMap(_ => said("not run"))
+    val p = failing.ensuring(closing).ensuring(said("outer"))
+    // its handler is outside the one that leaves: it unwinds the rest, and its answer is the result
+    assertEquals(logged(run(Throws.run(Throws.run(p)))), (Left(7), List("outer")))
+    // its handler is inside what is unwound: the failure is answered there, and the unwinding goes on from there
+    val inside = Throws.recover((n: Int) => said(s"rescued $n").map(_ => 0))(p).flatMap(_ => said("not run"))
+    assertEquals(logged(run(Throws.run(inside))), (Left("no"), List("outer", "rescued 7")))
+    // its handler is the one that leaves: nobody answers, the finalizer ends there, the first failure stands
+    val again: Unit ! Throws % String = Throws.raise("closing").flatMap(_ => said("not run"))
+    val own = (Throws.raise("no"): Int ! Throws % String).ensuring(again).ensuring(said("outer"))
+    assertEquals(logged(run(Throws.run(own))), (Left("no"), List("outer")))
+
+  test("ensuring, `k` is a value: unwound twice the finalizers run twice; resumed after, its path ends once more"):
+    val p: Int ! Account = ensuring(Account.deposit(1).flatMap(n => said(s"got $n").map(_ => n)))(said("closed"))
+    val handler = Handler.control[Account, Pure, Int, Int](pure)(
+      [X] => (op: Account[X], k: Continuation[X, Pure, Int]) => op match
+        case Account.Deposit(n) => k.unwind.flatMap(_ => k.unwind).flatMap(_ => k(n + 1)))
+    assertEquals(logged(run(handle(p, handler))), (2, List("closed", "closed", "got 2", "closed")))
+
+  test("ensuring, the rest of an unwinding kept by a handler inside it: resumed where the unwinding is not, refused"):
+    type Kept[X] = (Throws % String + Account)[X]
+    val failing: Int ! Kept = Throws.raise("no")
+    val p = failing.ensuring(Account.deposit(1).flatMap(_ => said("closed")))
+    var kept = Option.empty[Int ! Throws % String]
+    val keeper = Handler.general[Account, Throws % String, Int, Int](pure)(
+      [X] => (op: Account[X], k: X => Int ! Throws % String) => op match
+        case Account.Deposit(n) =>
+          kept = Some(k(n))
+          pure[Int, Throws % String](0))
+    // the finalizer waits at its operation; the unwinding goes on without it
+    val left: Int ! Throws % String = handle(p, keeper)
+    assertEquals(logged(run(Throws.run(left))), (Left("no"), Nil))
+    // resumed, the finalizer ends — and there is no unwinding to go on with, and no value
+    intercept[NoUnwinding](run(Throws.run(kept.get)))
+    assertEquals(log, List("closed"))
+
+  test("ensuring, `k` neither resumed nor unwound: nothing of it runs"):
+    val p: Int ! Account = ensuring(Account.deposit(1))(said("closed"))
+    val kept = Handler.general[Account, Pure, Int, Int](pure)([X] => (_: Account[X], _: X => Int ! Pure) => pure(0))
+    assertEquals(logged(run(handle(p, kept))), (0, Nil))
+
+  test("ensuring, asynchrony: a program that waits is kept, and its finalizer runs when it ends"):
+    var waiting = List.empty[() => Unit]
+    val p: Int ! Async = Async.await[Int](resume => waiting ::= (() => resume(1))).map(_ + 1).ensuring(said("closed"))
+    var result = Option.empty[Int]
+    assertEquals(logged(Async.start(p)(a => result = Some(a))), ((), Nil))
+    assertEquals(logged(waiting.foreach(_())), ((), List("closed")))
+    assertEquals(result, Some(2))
+
+  test("bracket: acquired, used, released — when the use ends and when it fails"):
+    def use(fails: Boolean): Int ! Throws % String =
+      bracket(said("open").map(_ => "file"))(f => said(s"use $f").flatMap(_ => if fails then Throws.raise("no") else
+        pure(f.length)))(f => said(s"close $f"))
+    assertEquals(logged(run(Throws.run(use(false)))), (Right(4), List("open", "use file", "close file")))
+    assertEquals(logged(run(Throws.run(use(true)))), (Left("no"), List("open", "use file", "close file")))
+
+  test("ensuring, constant stack: a million finalizers in a loop"):
+    def loop(n: Int): Int ! Counter =
+      if n == 0 then State.get else tick[Counter].ensuring(tick[Counter]).flatMap(_ => loop(n - 1))
+    assertEquals(run(State.run(0)(loop(1_000_000))), (2_000_000, 2_000_000))
+
+  test("ensuring, constant stack: a continuation with a hundred thousand waiting finalizers is unwound"):
+    val raised: Int ! Failing = Throws.raise("no")
+    val p = (1 to 100_000).foldLeft(raised)((p, _) => p.ensuring(tick[Failing]))
+    assertEquals(run(State.run(0)(Throws.run(p))), (100_000, Left("no")))
+
+  test("ensuring, an interceptor between the finalizer and the handler that leaves sees what the finalizer asks"):
+    var seen = List.empty[String]
+    def audit[A](p: A ! Failing): A ! Failing =
+      okay.effects.scala.intercept(p, Handler.general[State % Int, Failing, A, A](pure)(
+        [X] => (op: State[Int, X], k: X => A ! Failing) =>
+          seen ::= op.toString
+          perform[State % Int](op).flatMap(k)))
+    val failing: Int ! Failing = State.put(1).flatMap(_ => Throws.raise("no"))
+    val p = failing.ensuring(State.put(9))
+    assertEquals(run(State.run(0)(Throws.run(audit(p)))), (9, Left("no")))
+    assertEquals(seen.reverse, List("Put(1)", "Put(9)"))
+
+  test("ensuring, a program of a smaller row put into a bigger one: its finalizer runs there, its places renamed"):
+    type Small[X] = (Throws % String + State % Int)[X]
+    type Big[X] = (State % Int + Writer % String + Throws % String)[X]
+    val failing: Unit ! Small = State.put(1).flatMap(_ => Throws.raise("no"))
+    val small = failing.ensuring(State.put(2))
+    val p: Unit ! Big = for _ <- Writer.tell("before"); _ <- small; _ <- Writer.tell("after") yield ()
+    assertEquals(run(State.run(0)(Throws.run(Writer.run(p)))), (2, Left("no")))
+    assertEquals(run(State.run(0)(Writer.run(Throws.run(p)))), (2, (List("before"), Left("no"))))
+
+  test("ensuring, an operation no handler answers: whoever steps the program resumes its rest, or unwinds it"):
+    val p: Int ! Account = ensuring(Account.deposit(1))(said("closed"))
+    step(p) match
+      case asked: Step.Asked[Account, ?, ?, Int] =>
+        assertEquals(logged(step(asked.k.unwind)), (Step.Done[Account, Unit](()), List("closed")))
+      case _ => fail("an operation was expected")

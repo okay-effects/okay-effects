@@ -238,13 +238,15 @@ final class Remote(in: InputStream, out: OutputStream, cbor: Boolean = false, de
         numbers
       case call: Far.Open => open(call)
       case Far.Pull(stream) => pull(stream))
-    try okay.effects.scala.run(handle(p, handler))
-    finally
-      streams.keys.foreach(stream => send("cancel", "stream" -> Json.Int(stream)))
-      runs.foreach(run => send("forget", "run" -> Json.Int(run)))
-      streams.clear()
-      feeds.clear()
-      runs.clear()
+    okay.effects.scala.run(handle(p.ensuring(closed), handler))
+
+  /** what a program left open on the far side, closed: its finalizer */
+  private def closed: Unit ! Far = pure:
+    streams.keys.foreach(stream => send("cancel", "stream" -> Json.Int(stream)))
+    runs.foreach(run => send("forget", "run" -> Json.Int(run)))
+    streams.clear()
+    feeds.clear()
+    runs.clear()
 
   def close(): Unit =
     try out.close()

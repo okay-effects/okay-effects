@@ -41,8 +41,9 @@ object Reader:
 
   /** the program, its asks answered by the reader outside, through `f`: an interceptor */
   def local[V, R[_], A](f: V => V)(p: A ! R)(using In[Reader % V, R]): A ! R =
-    intercept(p, Handler.general[Reader % V, R, A, A](pure)([X] => (op: Reader[V, X], k: X => A ! R) => op match
-      case Ask() => ask[V].flatMap(v => k(f(v)))))
+    intercept(p, Handler.control[Reader % V, R, A, A](pure)(
+      [X] => (op: Reader[V, X], k: Continuation[X, R, A]) => op match
+        case Ask() => ask[V].flatMap(v => k(f(v)))))
 
 /** WRITER: values told, collected in order. */
 enum Writer[W, X]:
@@ -56,7 +57,7 @@ object Writer:
       [X] => (op: Writer[W, X], told: Cell[List[W]]) => op match
         case Tell(w) => told.set(w :: told.get)))
 
-/** THROWS: the rest of the program is dropped. */
+/** THROWS: the rest of the program is left — unwound, its finalizers run — before the failure is answered. */
 enum Throws[E, X]:
   case Raise[E](error: E) extends Throws[E, Nothing]
 
@@ -73,7 +74,8 @@ object Throws:
     handle(p, Handler.abort[Throws % E, Rest, A, A](pure)([X] => (op: Throws[E, X]) => op match
       case Raise(error) => rescue(error)))
 
-/** CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times. */
+/** CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times. With no
+ * value it is left: unwound. */
 enum Choose[X]:
   case Among[X](xs: List[X]) extends Choose[X]
 
@@ -84,15 +86,17 @@ object Choose:
 
   /** every value the program comes to */
   def all[R[_], Rest[_], A](p: A ! R)(using Split[Choose, R, Rest]): List[A] ! Rest =
-    handle(p, Handler.general[Choose, Rest, A, List[A]](a => pure(List(a)))(
-      [X] => (op: Choose[X], k: X => List[A] ! Rest) => op match
+    handle(p, Handler.control[Choose, Rest, A, List[A]](a => pure(List(a)))(
+      [X] => (op: Choose[X], k: Continuation[X, Rest, List[A]]) => op match
+        case Among(Nil) => k.unwind.map(_ => Nil)
         case Among(xs) =>
           xs.foldLeft(pure[List[A], Rest](Nil))((all, x) => all.flatMap(as => k(x).map(as ++ _)))))
 
-  /** the first value the program comes to, the other paths not taken */
+  /** the first value the program comes to, the other paths not taken: they were not begun, and hold nothing */
   def first[R[_], Rest[_], A](p: A ! R)(using Split[Choose, R, Rest]): Option[A] ! Rest =
-    handle(p, Handler.general[Choose, Rest, A, Option[A]](a => pure(Some(a)))(
-      [X] => (op: Choose[X], k: X => Option[A] ! Rest) => op match
+    handle(p, Handler.control[Choose, Rest, A, Option[A]](a => pure(Some(a)))(
+      [X] => (op: Choose[X], k: Continuation[X, Rest, Option[A]]) => op match
+        case Among(Nil) => k.unwind.map(_ => None)
         case Among(xs) =>
           def from(left: List[X]): Option[A] ! Rest = left match
             case Nil => pure(None)

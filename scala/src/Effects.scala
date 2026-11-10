@@ -15,6 +15,8 @@ sealed abstract class Comp[R[_], +A]:
     Comp.Bind(fits(this), a => Comp.Done(f(a)))
   /** this program in a row that has its effects, and others: `p.into[S]` */
   final def into[S[_]](using sub: Sub[R, S]): A ! S = Comp.embedded(this, sub)
+  /** this program, and `finalizer` when it is left: `ensuring(this)(finalizer)` */
+  final def ensuring(finalizer: => Any ! R): A ! R = Comp.Ensure(this, () => finalizer)
 
 object Comp:
   /** a value */
@@ -31,6 +33,12 @@ object Comp:
   /** a continuation taken earlier, resumed with an answer */
   private[scala] final case class Resume[R0[_], V0, X, R[_], A](k: Machine.K[R0, V0, X, R, A], x: X)
       extends Comp[R, A]
+  /** a computation, and the finalizer that runs when it is left: with its value, or unwound */
+  private[scala] final case class Ensure[R[_], +A](body: Comp[R, A], finalizer: () => Comp[R, Any])
+      extends Comp[R, A]
+  /** a continuation taken earlier, unwound: its finalizers run, and nothing else of it */
+  private[scala] final case class Unwind[R0[_], V0, X, R[_], A](k: Machine.K[R0, V0, X, R, A])
+      extends Comp[R, Unit]
 
   /** a word is a program of any row that has its effect: its place is found where the row is known */
   implicit def placed[E[_], X, R[_]](w: Word[E, X])(using at: In[E, R]): X ! R = w.into
@@ -71,7 +79,7 @@ object Step:
   final case class Done[R[_], +A](value: A) extends Step[R, A]
 
   /** an operation no handler answered: its place in the row, and the rest of the program */
-  final case class Asked[R[_], E[_], X, +A](at: In[E, R], op: E[X], k: X => A ! R) extends Step[R, A]:
+  final case class Asked[R[_], E[_], X, +A](at: In[E, R], op: E[X], k: Continuation[X, R, A]) extends Step[R, A]:
     /** this, as an operation of `F`, when it is one: when its place is `F`'s place */
     def of[F[_]](using place: In[F, R]): Option[Asked[R, F, X, A]] =
       Option(at.place.same[F, [G[_]] =>> Asked[R, G, X, A]](place.place, this))
@@ -80,6 +88,24 @@ object Step:
  * another row, as if it were one of its own effects. Rows and effects are of one kind, so the types cannot refuse
  * it. */
 final class NoHandler(val op: Any) extends RuntimeException("an operation with no handler: " + op)
+
+/** The rest of an unwinding resumed where the unwinding is not: a continuation taken from a finalizer while it ran
+ * in an unwinding, by a handler inside the part unwound, was kept and resumed on another stack. The finalizers
+ * have run; there is no value to go on with. */
+final class NoUnwinding extends RuntimeException("the rest of an unwinding was resumed outside the unwinding")
+
+/** THE REST OF A PROGRAM, as a general handler's clause is given it: `k`. A function — `k(x)` is the program that
+ * RESUMES it with the answer `x`. And `k.unwind` is the program that LEAVES it: the finalizers that wait in it
+ * (`ensuring`) run, the innermost first, and nothing else of it does; then `()`. The handler that unwinds has
+ * left: an operation of its own that a finalizer asks then is not answered by it — it goes to the handler
+ * outside, if this one kept its effect in the row (`intercept`), and else the finalizer ends there. A failure of
+ * a finalizer answered inside what is unwound does not stop the unwinding. A `k` is a value, and nothing
+ * is remembered of what was done with it: every resumption is a path, which runs its finalizers at its end, and
+ * every unwinding is the end of a path — unwound twice, the finalizers run twice. A clause that neither resumes
+ * nor unwinds `k` runs nothing of it: the rest of the program is kept, and may be resumed later (`Async`). */
+abstract class Continuation[-X, R[_], +B] private[scala] () extends (X => B ! R):
+  /** this continuation left: its finalizers, then `()` */
+  def unwind: Unit ! R
 
 /** A handler's state, read and written by its clause while it answers. */
 abstract class Cell[S] private[scala] (private[scala] var state: S):
@@ -91,8 +117,8 @@ abstract class Cell[S] private[scala] (private[scala] var state: S):
  * answers an `S`. Made by `Handler.general`, `tail`, `abort`, `stateful`. */
 enum Handler[E[_], R[_], A, B]:
   /** THE GENERAL HANDLER: a clause is given the rest of the program, `k`, as a value: to resume once, many times,
-   * later, or never */
-  case General(ret: A => B ! R, on: [X] => (E[X], X => B ! R) => B ! R)
+   * or later; or to unwind */
+  case General(ret: A => B ! R, on: [X] => (E[X], Continuation[X, R, B]) => B ! R)
   /** THE HANDLER IN PLACE: every operation answered at once, from a state the handler keeps — nothing is captured,
    * the program goes on. The state belongs to the path: a continuation resumed twice starts twice from the state
    * it was taken with. */
@@ -101,9 +127,14 @@ enum Handler[E[_], R[_], A, B]:
 
 /** a handler of each shape, its value's clause first, its operations' after */
 object Handler:
-  /** `on` gets the operation and `k`, the rest of the program under this handler */
+  /** `on` gets the operation and `k`, the rest of the program under this handler, as a function: to resume */
   def general[E[_], R[_], A, B](ret: A => B ! R)(on: [X] => (E[X], X => B ! R) => B ! R): Handler[E, R, A, B] =
-    General(ret, on)
+    General(ret, [X] => (op: E[X], k: Continuation[X, R, B]) => on(op, k))
+
+  /** `on` gets the operation and `k` as it is: to resume, or to unwind — a clause that does not go on with the
+   * rest of the program says `k.unwind` first, so that what the program holds is released */
+  def control[E[_], R[_], A, B](ret: A => B ! R)(on: [X] => (E[X], Continuation[X, R, B]) => B ! R)
+      : Handler[E, R, A, B] = General(ret, on)
 
   /** each operation answered in place, from the state in the cell */
   def stateful[E[_], R[_], A, B, S](init: S)(ret: (S, A) => B ! R)(answer: [X] => (E[X], Cell[S]) => X)
@@ -113,9 +144,10 @@ object Handler:
   def tail[E[_], R[_], A, B](ret: A => B ! R)(answer: [X] => E[X] => X): Handler[E, R, A, B] =
     Stateful[E, R, A, B, Unit]((), (_, a) => ret(a), [X] => (op: E[X], _: Cell[Unit]) => answer(op))
 
-  /** each operation ends the program: `abort`'s is the handler's result — a general handler that drops `k` */
+  /** each operation ends the program: `abort`'s is the handler's result — a general handler that unwinds `k`,
+   * then goes on with `abort` */
   def abort[E[_], R[_], A, B](ret: A => B ! R)(abort: [X] => E[X] => B ! R): Handler[E, R, A, B] =
-    General(ret, [X] => (op: E[X], _: X => B ! R) => abort(op))
+    General(ret, [X] => (op: E[X], k: Continuation[X, R, B]) => k.unwind.flatMap(_ => abort(op)))
 
 def pure[A, R[_]](a: A): A ! R = Comp.Done(a)
 
@@ -162,6 +194,20 @@ extension [E[_]](performing: Performing[E])
 
 /** a computation built when it is reached: a call in tail position takes no stack */
 def defer[A, R[_]](p: => A ! R): A ! R = Comp.Bind(unit[R], _ => p)
+
+/** `p`, AND `finalizer` WHEN IT IS LEFT. With a value: the finalizer runs, and the value is `p`'s. Without one —
+ * a handler outside does not go on with the rest of the program `p` is part of, and unwinds it (a failure, the
+ * first of the choices, a stream cut short): the finalizer runs then, where it was installed — the handlers
+ * between it and the one that leaves still answer it, their states as the path left them. Finalizers run the
+ * innermost first, each once for every path that ends or is unwound past it. The finalizer is a program of the
+ * same row, made when it is run; its value is dropped. One that fails is left as any program is: what waits
+ * beyond it is still unwound, and the failure goes to its handler. Not run: when the rest of the program is kept
+ * and never resumed (an `Emit.pull` not read to its end), and when the host throws. */
+def ensuring[A, R[_]](p: A ! R)(finalizer: => Any ! R): A ! R = Comp.Ensure(p, () => finalizer)
+
+/** `acquire`d, used, `release`d when the use is left: `ensuring` of the use */
+def bracket[S, A, R[_]](acquire: S ! R)(use: S => A ! R)(release: S => Any ! R): A ! R =
+  Comp.Bind(acquire, s => Comp.Ensure(use(s), () => release(s)))
 
 /** `E` handled by `h` from wherever it is in `p`'s row: the program over the rest */
 def handle[E[_], R[_], Rest[_], A, B](p: A ! R, h: Handler[E, Rest, A, B])(using at: Split[E, R, Rest]): B ! Rest =
