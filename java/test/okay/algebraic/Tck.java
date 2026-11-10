@@ -128,7 +128,8 @@ final class Tck {
     long d = 0;
     for (int i = 0; i < 1000; i++) {
       T t = gen(r, 6);
-      t = new ChooseH(new ThrowsH(0, new ThrowsH(1, new StateH(0, 0, new StateH(1, 0, new WriterH(0, new WriterH(1, t)))))));
+      t = new StateH(0, 0, new StateH(1, 0, new WriterH(0, new WriterH(1, t))));
+      t = new ChooseH(new ThrowsH(0, new ThrowsH(1, t)));
       d = d * 31 + outcome(t);
     }
     return d;

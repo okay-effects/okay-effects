@@ -1,0 +1,14 @@
+# The part of the okay wire these kernels speak, as a transcript: `>` host to far side, `<` far side to host,
+# one JSON object a line. The lines are the okay wire's own (okay: okay-py/src/main/resources/okay/py/wire.txt,
+# "program: a program as data, continued TWICE"), and one more: a continuation asked for after `forget`.
+# Every worker of this repository must answer the `>` lines with the `<` lines (test.sh).
+> {"id": 6, "op": "program", "run": 1, "fn": "t:pairs", "args": [], "callbacks": ["choose"]}
+< {"id": 6, "ok": {"perform": "choose", "args": [[1, 2]], "k": 1}}
+> {"id": 7, "op": "continue", "run": 1, "k": 1, "answer": 1}
+< {"id": 7, "ok": {"done": 10}}
+> {"id": 8, "op": "continue", "run": 1, "k": 1, "answer": 2}
+< {"id": 8, "ok": {"done": 20}}
+> {"id": 9, "op": "forget", "run": 1}
+< {"id": 9, "ok": null}
+> {"id": 10, "op": "continue", "run": 1, "k": 1, "answer": 2}
+< {"id": 10, "condition": {"kind": "LookupError", "message": "no continuation 1 of run 1"}}

@@ -74,7 +74,8 @@ final class Properties {
     test("mutual tail recursion without end: a million calls", () -> same(even(1_000_000).run(), true));
 
     test("a continuation taken many times: every path of a choice", () -> {
-      Comp<Pair> p = Choose.among(List.of(1, 2, 3)).flatMap(x -> Choose.among(List.of(10, 20)).map(y -> new Pair(x, y)));
+      Comp<Pair> p =
+          Choose.among(List.of(1, 2, 3)).flatMap(x -> Choose.among(List.of(10, 20)).map(y -> new Pair(x, y)));
       same(Choose.all(p).run(), List.of(
           new Pair(1, 10), new Pair(1, 20), new Pair(2, 10), new Pair(2, 20), new Pair(3, 10), new Pair(3, 20)));
     });

@@ -12,6 +12,8 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 pub mod effects;
+pub mod json;
+pub mod wire;
 
 /// An operation: a question as data, answered by an `Answer`.
 pub trait Op: 'static {
