@@ -254,9 +254,10 @@ class WireTests extends munit.FunSuite:
         Some("s"))
       out.toString(UTF_8).linesIterator.map(Json.parse).toList
     val add = """{"id":1,"op":"call","fn":"t:add","args":[2,3]}"""
-    val List(hello, early) = said(add): @unchecked
-    assertEquals(hello("auth")("scheme"), Json.Str("hmac-sha256"))
-    assertEquals(early("condition")("kind"), Json.Str("PermissionError"))
+    val early = said(add)
+    assertEquals(early.length, 2)
+    assertEquals(early(0)("auth")("scheme"), Json.Str("hmac-sha256"))
+    assertEquals(early(1)("condition")("kind"), Json.Str("PermissionError"))
     val wrong = said("""{"op":"auth","nonce":"00","mac":"00"}""", add)
     assertEquals(wrong.length, 2)
     assertEquals(wrong(1)("condition")("kind"), Json.Str("PermissionError"))

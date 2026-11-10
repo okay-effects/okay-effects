@@ -6,8 +6,9 @@ import okay.effects.scala.*
  * THE STANDARD EFFECTS: each an enum of its operations — data; each says what answers it — its words, its
  * handlers. A word is an operation not yet placed (`Word`): it says no row; the program it is used in does, by
  * its declared type or by the evidence in scope. What is made of several operations (`State.modify`,
- * `Emit.sendAll`) is a program, generic in its row: bound in a program of a declared row, it is told that row —
- * `State.modify[Int, App](_ + 1)`.
+ * `Emit.sendAll`) is a program, generic in its row. Where a row is expected of it, or evidence is in scope, it is
+ * of that row. Bound first in a `for`, nothing says its row: it is a program of its effect alone, and the bind puts
+ * it into the row of the `for` — under a level that renames its operations, which a word does not pay.
  */
 
 /** STATE of type `S`, read and written. */

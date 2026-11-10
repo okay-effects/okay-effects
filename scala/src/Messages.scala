@@ -15,7 +15,7 @@ object Messages:
   private def missing(using Quotes)(effect: quotes.reflect.TypeRepr, row: quotes.reflect.TypeRepr): String =
     val alone = !row.typeSymbol.isTypeParam && written(row) != "Pure" && !written(row).contains(" + ")
     val hint = if !alone then "" else ". If this row was not said, it is the row of a word alone: declare the " +
-      "program's type — `val p: A ! Row = ...` — or say the row on its first word — `.into[Row]`"
+      "program's type — `val p: A ! Row = ...` — or say the row on its last word — `.into[Row]`"
     s"the effect ${written(effect)} is not in the row ${written(row)}$hint"
 
   /** a handler's `Split`: the effect not in the row — or in it, and the row without it is not the one asked for */

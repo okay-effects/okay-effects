@@ -28,8 +28,9 @@ object Far:
   private def orRaise[A, R[_]: Has[Throws % Condition]](answer: Either[Condition, A]): A ! R =
     answer.fold(Throws.raise, pure)
 
-  private def ask[R[_]: Has[Far] : Has[Throws % Condition]](op: String, fields: (String, Json)*): Json ! R =
-    perform[Far](Send(op, fields.toList)).flatMap(id => perform[Far](Receive(id))).flatMap(orRaise)
+  /** a request sent, and its answer waited for */
+  private def ask(op: String, fields: (String, Json)*): Json ! Failing =
+    word(Send(op, fields.toList)).flatMap(id => word(Receive(id)).flatMap(orRaise))
 
   private def arguments(args: Seq[Json]): (String, Json) = "args" -> Json.Arr(args.toList.map(Escapes.enc))
 
@@ -42,27 +43,27 @@ object Far:
 
   /** the answer of a call begun */
   def result(id: Long): Json ! Failing =
-    word(Receive(id)).into[Failing].flatMap(orRaise).map(Escapes.dec)
+    for answer <- word(Receive(id)); value <- orRaise(answer) yield Escapes.dec(value)
 
   /** the far function's answer kept on the far side: a ref to it */
   def hold(fn: String, args: Json*): Json.Ref ! Failing =
-    ask[Failing]("call", "fn" -> Json.Str(fn), arguments(args), "held" -> Json.Bool(true)).map(Escapes.dec).flatMap:
+    ask("call", "fn" -> Json.Str(fn), arguments(args), "held" -> Json.Bool(true)).map(Escapes.dec).flatMap:
       case ref: Json.Ref => pure(ref)
       case other => Throws.raise(Condition("WireError", s"a ref was expected: $other"))
 
   /** a method of an object held */
   def method(ref: Json.Ref, name: String, args: Json*): Json ! Failing =
-    ask[Failing]("call", "fn" -> Json.obj("ref" -> Json.Int(ref.id), "method" -> Json.Str(name)), arguments(args))
+    ask("call", "fn" -> Json.obj("ref" -> Json.Int(ref.id), "method" -> Json.Str(name)), arguments(args))
       .map(Escapes.dec)
 
   /** an attribute of an object held */
   def attr(ref: Json.Ref, name: String): Json ! Failing =
-    ask[Failing]("call", "fn" -> Json.obj("ref" -> Json.Int(ref.id), "attr" -> Json.Str(name)), arguments(Nil))
+    ask("call", "fn" -> Json.obj("ref" -> Json.Int(ref.id), "attr" -> Json.Str(name)), arguments(Nil))
       .map(Escapes.dec)
 
   /** what the ref names is dropped on the far side */
   def release(ref: Json.Ref): Unit ! Failing =
-    ask[Failing]("release", "ref" -> Json.Int(ref.id)).map(_ => ())
+    ask("release", "ref" -> Json.Int(ref.id)).map(_ => ())
 
   /** THE FAR PROGRAM `fn`, as a program of this side: what it asks is asked here as a `Call`, and answered by this
    * side's handlers — once, many times, or never. `callbacks` names what this side offers, for a far side that
@@ -73,12 +74,11 @@ object Far:
       val run = "run" -> Json.Int(number)
       def node(ok: Json): Json ! R = ok("perform") match
         case Json.Str(name) =>
-          word(Call(name, Escapes.items(ok("args")).map(Escapes.dec)))
-            .flatMap(answer => ask[R]("continue", run, "k" -> ok("k"), "answer" -> Escapes.enc(answer)))
-            .flatMap(node)
+          word(Call(name, Escapes.items(ok("args")).map(Escapes.dec))).flatMap: answer =>
+            ask("continue", run, "k" -> ok("k"), "answer" -> Escapes.enc(answer)).flatMap(node)
         case _ => pure(Escapes.dec(ok("done")))
       val offered = Option.when(callbacks.nonEmpty)("callbacks" -> Json.Arr(callbacks.map(Json.Str(_))))
-      ask[R]("program", List(run, "fn" -> Json.Str(fn), arguments(args)) ++ offered*).flatMap(node)
+      ask("program", List(run, "fn" -> Json.Str(fn), arguments(args)) ++ offered*).flatMap(node)
 
   /** THE FAR FUNCTION'S STREAM, as a stream of this side: it sends what the far side sends. The far side runs at
    * most `credit` chunks ahead of whoever takes them here. With an `input`, that stream is fed to the far function,
@@ -87,11 +87,15 @@ object Far:
       : Unit ! Failing + Emit % Json =
     type R[X] = (Failing + Emit % Json)[X]
     def fed = input.map(Emit.pull(_).map(Escapes.enc))
-    defer(word(Open(fn, args.map(Escapes.enc), credit, fed)).into[R]).flatMap(orRaise).flatMap: stream =>
-      def rest: Unit ! R = word(Pull(stream)).into[R].flatMap(orRaise).flatMap:
-        case Some(chunk) => Emit.send(Escapes.dec(chunk)).flatMap(_ => rest)
+    def rest(stream: Long): Unit ! R = word(Pull(stream)).flatMap: pulled =>
+      orRaise(pulled).flatMap:
+        case Some(chunk) => Emit.send(Escapes.dec(chunk)).flatMap(_ => rest(stream))
         case None => unit
-      rest
+    for
+      opened <- defer(word(Open(fn, args.map(Escapes.enc), credit, fed)))
+      stream <- orRaise(opened)
+      _ <- rest(stream)
+    yield ()
 
 /** THE HOST'S END of a wire to a far side. Opening it is the handshake: the far side's hello, the proof of the
  * `secret` if there is one, and `configure` when CBOR or DEFLATE is asked for; each mismatch is refused by name. */

@@ -153,12 +153,14 @@ class Properties extends munit.FunSuite:
   test("an effect with no handler, and a handler with a case missing, do not compile"):
     assert(compileErrors("run(State.get[Int].into[Counter])").nonEmpty)
     assert(compileErrors("run(State.run(0)(Choose.among(1, 2)))").nonEmpty)
-    val handled = "run(Choose.all(State.run(0)(State.get[Int].into[Chosen].flatMap(_ => Choose.among(1, 2)))))"
+    val handled = "run(Choose.all(State.run(0)(State.get[Int].flatMap(_ => Choose.among(1, 2).into[Chosen]))))"
     assert(compileErrors(handled).isEmpty)
 
-  test("no handler: an operation that reached the top is refused by name"):
-    val open = State.get[Int].into[Counter].asInstanceOf[Int ! Pure]
-    assert(intercept[NoHandler](run(open)).op == State.Get())
+  test("no handler: a row handled as if it were one effect is refused when an operation of it comes"):
+    // rows and effects are of one kind, so this compiles: a handler of `Chosen`, the row, in a program of `Chosen`
+    val p: Int ! Chosen = Choose.among(1, 2)
+    val wrong = handle(p, Handler.abort[Chosen, Pure, Int, Int](pure)([X] => (_: Chosen[X]) => pure(0)))
+    assert(intercept[NoHandler](run(wrong)).op == Choose.Among(List(1, 2)))
 
   // ---- the row is ordered, and a handler is found by the effect's place in it
 
@@ -291,7 +293,10 @@ class Properties extends munit.FunSuite:
     assertEquals(run(State.run(1)(for s <- State.get[Int]; _ <- State.put(s + 1) yield s)), (2, 1))
     val unsaid = compileErrors("run(Choose.all(State.run(0)(for x <- Choose.among(1, 2); _ <- State.put(x) yield x)))")
     assert(unsaid.contains("the effect Choose is not in the row State % Int. If this row was not said"), unsaid)
-    val said = for x <- Choose.among(1, 2).into[Chosen]; _ <- State.put(x) yield x
+    val declared: Int ! Chosen = for x <- Choose.among(1, 2); _ <- State.put(x) yield x
+    assertEquals(run(Choose.all(State.run(0)(declared))), List((1, 1), (2, 2)))
+    // or the row is said on the last word: a bind takes its row from what follows it
+    val said = for x <- Choose.among(1, 2); _ <- State.put(x).into[Chosen] yield x
     assertEquals(run(Choose.all(State.run(0)(said))), List((1, 1), (2, 2)))
 
   // ---- a row in a row
@@ -312,7 +317,7 @@ class Properties extends munit.FunSuite:
     // a continuation taken inside is resumed twice across the embedding: each path its own state, or one state
     assertEquals(run(Choose.all(State.run(0)(p.into[Swapped]))), List((1, 1), (2, 2)))
     assertEquals(run(State.run(0)(Choose.all(p.into[Swapped]))), (3, List(1, 3)))
-    val wide: Int ! Wide = for r <- Reader.ask[Int]; x <- p.into[Wide]; _ <- Writer.tell(s"$r $x") yield x * r
+    val wide: Int ! Wide = for r <- Reader.ask[Int]; x <- p; _ <- Writer.tell(s"$r $x") yield x * r
     val ran = run(Writer.run(Reader.run(10)(State.run(0)(Choose.all(wide)))))
     assertEquals(ran, (List("10 1", "10 3"), (3, List(10, 30))))
     // a handler inside the embedding takes its effect out there: the places after it are renamed still
@@ -323,10 +328,10 @@ class Properties extends munit.FunSuite:
       case asked: Step.Asked[Swapped, ?, ?, Int] => assert(asked.of[State % Int].isDefined && asked.of[Choose].isEmpty)
       case _ => fail("an operation was expected")
 
-  test("an embedding that keeps the places, or of an operation alone, is nothing at run time"):
+  test("an embedding into the same row, or of an operation alone, is nothing at run time"):
     val p: Int ! Choose = Choose.among(1, 2).map(_ + 1)
-    assert(p.into[Chosen] eq p.asInstanceOf[AnyRef])
-    assert(p.into[Choose] eq p.asInstanceOf[AnyRef])
+    val same: AnyRef = p.into[Choose]
+    assert(same eq p)
     val one: Int ! Chosen = State.get
     assert(one.into[Choose + State % Int].isInstanceOf[Comp.Ask[?, ?, ?]])
     assertEquals(run(State.run(5)(Choose.all(one.into[Choose + State % Int]))), (5, List(5)))
@@ -378,3 +383,89 @@ class Properties extends munit.FunSuite:
       case Fail.Raise(e) => pure(e.length))
     assertEquals(run(handle(Fail.raise("four"), handler)), 4)
     assertEquals(run(Fresh.from(10)(for a <- Fresh.next; b <- Fresh.next yield a + b)), 21L)
+
+  // ---- a program of a smaller row is put into the row where it is bound
+
+  type App[X] = (Reader % Int + State % Int + Writer % String)[X]
+
+  def tick[R[_]: Has[State % Int]]: Unit ! R = State.modify((s: Int) => s + 1)
+
+  test("a program of a smaller row is bound in a declared row: at the head of a `for`, and later"):
+    val p: Int ! App =
+      for
+        _ <- State.modify((s: Int) => s + 1)
+        r <- Reader.ask[Int]
+        _ <- tick
+        s <- State.get[Int]
+      yield r + s
+    assertEquals(run(Reader.run(10)(State.run(0)(Writer.run(p)))), (2, (Nil, 12)))
+
+  test("a program of a smaller row where one of a bigger row is expected: a result, an argument, a branch"):
+    def twice(p: Unit ! App): Unit ! App = p.flatMap(_ => p)
+    def bump(by: Int): Unit ! App = if by == 0 then unit else State.modify((s: Int) => s + by)
+    val p: Int ! App = twice(tick).flatMap(_ => bump(10)).flatMap(_ => State.get)
+    assertEquals(run(Reader.run(0)(State.run(0)(Writer.run(p))))._1, 12)
+    // `map` alone: the row expected of it is bigger than the program's
+    val mapped: String ! App = tick.map(_ => "done")
+    assertEquals(run(Reader.run(0)(State.run(0)(Writer.run(mapped)))), (1, (Nil, "done")))
+
+  test("a continuation taken inside a program put into a row where it is bound is resumed twice across it"):
+    type Small[X] = (State % Int + Choose)[X]
+    type Big[X] = (Choose + Writer % String + State % Int)[X]
+    val inner: Int ! Small = for x <- Choose.among(1, 2); s <- State.get[Int]; _ <- State.put(s + x) yield s + x
+    val p: Int ! Big = for a <- inner; _ <- Writer.tell(s"$a"); b <- inner yield a * 10 + b
+    // each path its own state, or one state through all
+    assertEquals(run(Choose.all(Writer.run(State.run(0)(p)))).map(_._2._2), List(12, 13, 23, 24))
+    assertEquals(run(State.run(0)(Choose.all(Writer.run(p))))._1, 9)
+
+  test("constant stack through a million programs put into a row where they are bound"):
+    def ticks(n: Int): Int ! App = if n == 0 then State.get else tick.flatMap(_ => ticks(n - 1))
+    assertEquals(run(Reader.run(0)(State.run(0)(Writer.run(ticks(1_000_000)))))._1, 1_000_000)
+
+  test("three branches and more, words and programs of smaller rows among them, are bound"):
+    def step(n: Int): Unit ! App =
+      for
+        s <- State.get[Int]
+        _ <-
+          if n < 0 then Writer.tell("negative")
+          else if n == 0 then tick
+          else if s > 100 then unit
+          else State.put(s + n)
+        r <- n match
+          case 0 => Reader.ask[Int]
+          case 1 => State.get[Int]
+          case _ => pure(n)
+        _ <- Writer.tell(s"$n: $r")
+      yield ()
+    val p: Unit ! App = step(-1).flatMap(_ => step(0)).flatMap(_ => step(1)).flatMap(_ => step(5))
+    val told = List("negative", "-1: -1", "0: 7", "1: 2", "5: 5")
+    assertEquals(run(Reader.run(7)(State.run(0)(Writer.run(p)))), (7, (told, ())))
+
+  test("a word without its type: found from the evidence in scope, or where a program is expected; else it is said"):
+    def bumped[R[_]: Has[State % Int] : Has[Reader % Int]]: Int ! R =
+      for s <- State.get; r <- Reader.ask; _ <- State.put(s + r) yield s
+    assertEquals(run(Reader.run(10)(State.run(1)(Writer.run(bumped[App])))), (11, (Nil, 1)))
+    val read: Int ! App = State.get
+    assertEquals(run(Reader.run(10)(State.run(1)(Writer.run(read))))._2._2, 1)
+    // bound in a program of a declared row, with no evidence in scope, its type is said: the row comes to a bind
+    // with the function it is bound to, too late to say what that function takes
+    val said: Int ! App = for s <- State.get[Int]; _ <- State.put(s + 1) yield s
+    assertEquals(run(Reader.run(10)(State.run(1)(Writer.run(said))))._1, 2)
+    assert(compileErrors("val p: Int ! App = for s <- State.get; _ <- State.put(s + 1) yield s").nonEmpty)
+
+  test("a row of four: handlers take their effects from the last place, the first, or between, in any order"):
+    type Four[X] = (Reader % Int + Reader % String + State % Int + Writer % String)[X]
+    val p: Int ! Four =
+      for
+        a <- Reader.ask[Int]; b <- Reader.ask[String]
+        s <- State.get[Int]; _ <- State.put(s + a); _ <- Writer.tell(b * a)
+      yield s
+    assertEquals(run(Reader.run("x")(Reader.run(2)(State.run(1)(Writer.run(p))))), (3, (List("xx"), 1)))
+    assertEquals(run(Writer.run(State.run(1)(Reader.run("x")(Reader.run(2)(p))))), (List("xx"), (3, 1)))
+    assertEquals(run(Writer.run(Reader.run(2)(Reader.run("x")(State.run(1)(p))))), (List("xx"), (3, 1)))
+    assertEquals(run(State.run(1)(Reader.run(2)(Writer.run(Reader.run("x")(p))))), (3, (List("xx"), 1)))
+    assertEquals(run(Reader.run(2)(Writer.run(State.run(1)(Reader.run("x")(p))))), (List("xx"), (3, 1)))
+    // and in a row where they are in another order, under a level that renames
+    type Turned[X] = (Writer % String + State % Int + Reader % String + Reader % Int)[X]
+    assertEquals(run(Reader.run("x")(Writer.run(Reader.run(2)(State.run(1)(p.into[Turned]))))), (List("xx"), (3, 1)))
+    assertEquals(run(State.run(1)(Reader.run(2)(Reader.run("x")(Writer.run(p.into[Turned]))))), (3, (List("xx"), 1)))
