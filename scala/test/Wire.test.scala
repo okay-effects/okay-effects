@@ -196,6 +196,37 @@ class WireTests extends munit.FunSuite:
       assertEquals(remote.run(Throws.run(Far.call("t:add", Json.Int(2), Json.Int(3)))), Right(Json.Int(5)))
     finally remote.close()
 
+  test("a run closes what it left open: when it ends, when it is left through an effect, when the host throws"):
+    // a far side that has said all it will say: its hello, and that each of three streams is open
+    val opened = List(1, 4, 7).map(id => s"""{"id":$id,"ok":null}""")
+    val heard = ("""{"shim":9,"speaks":{"format":["json"],"mux":true}}""" :: opened).mkString("", "\n", "\n")
+    val out = ByteArrayOutputStream()
+    val remote = Remote(ByteArrayInputStream(heard.getBytes(UTF_8)), out)
+    /** what this side has asked so far: each request's name, and the stream or the run it is about */
+    def asked: List[String] = out.toString(UTF_8).linesIterator.map(Json.parse).toList.map: request =>
+      val about = if request("stream") != Json.Null then request("stream") else request("run")
+      request("op") match
+        case Json.Str(name) => s"$name $about"
+        case other => s"$other $about"
+    /** a run begun and a stream opened, both left open; then `end` */
+    def leaving(end: Unit ! Failing): Unit ! Failing =
+      perform[Far](Far.Run).flatMap(_ => perform[Far](Far.Open("t:numbers", Nil, 1, None))).flatMap(_ => end)
+    val first = List("call 2", "cancel 2", "forget 1")
+    assertEquals(remote.run(Throws.run(leaving(unit))), Right(()))
+    assertEquals(asked, first)
+    // left through an effect: the failure's handler is inside the program, which so ends with a value
+    val second = first ++ List("call 4", "cancel 4", "forget 3")
+    assertEquals(remote.run(Throws.run(leaving(Throws.raise(Condition("ValueError", "no"))))).left.map(_.kind),
+      Left("ValueError"))
+    assertEquals(asked, second)
+    // the host throws: closed at once, before the exception is out of `run`
+    val third = second ++ List("call 6", "cancel 6", "forget 5")
+    intercept[IllegalStateException](remote.run(Throws.run(leaving(defer(throw IllegalStateException("host"))))))
+    assertEquals(asked, third)
+    // and nothing is left for a later run to close
+    assertEquals(remote.run(pure(1)), 1)
+    assertEquals(asked, third)
+
   test("mux: an answer that comes later, on another thread, does not hold the next"):
     val module = Worker.Module(Map(
       "slow" -> (_ => Async.sleep(100).map(_ => Json.Str("slow"))),

@@ -15,8 +15,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.stream.IntStream;
 import okay.effects.java.Comp;
+import okay.effects.java.Eff;
 import okay.effects.java.std.Async;
 import okay.effects.java.std.Emit;
 import okay.effects.java.std.Throws;
@@ -100,6 +102,21 @@ final class WireTests {
 
   static <A> String kind(Throws.Result<Condition, A> result) {
     return result instanceof Throws.Err<Condition, A>(Condition c) ? c.kind : "no failure: " + result;
+  }
+
+  /** a run begun and a stream opened, both left open; then {@code end} */
+  static Comp<Void, Eff<Throws<Condition>, ? extends Eff<Far, ?>>> leaving(
+      Supplier<Comp<Void, Eff<Throws<Condition>, ? extends Eff<Far, ?>>>> end) {
+    return up(perform(new Far.Run())).flatMap(run ->
+        up(perform(new Far.Open("t:numbers", List.of(), 1, Optional.empty()))).flatMap(opened -> end.get()));
+  }
+
+  /** what a host has asked so far: each request's name, and the stream or the run it is about */
+  static List<String> asked(ByteArrayOutputStream out) {
+    return out.toString(UTF_8).lines().map(Json::parse).map(request -> {
+      Json about = request.get("stream") != Json.NULL ? request.get("stream") : request.get("run");
+      return (request.get("op") instanceof Json.Str(String name) ? name : "?") + " " + about.text();
+    }).toList();
   }
 
   static Comp<Json, Worker.Row> slow(List<Json> args) {
@@ -295,6 +312,32 @@ final class WireTests {
         same(Demo.attempt(remote, Far.call("t:add", Json.of(2), Json.of(3))), new Throws.Ok<>(Json.of(5)));
       }
     });
+
+    test("a run closes what it left open: when it ends, when it is left through an effect, when the host throws",
+        () -> {
+          // a far side that has said all it will say: its hello, and that each of three streams is open
+          String heard = "{\"shim\":9,\"speaks\":{\"format\":[\"json\"],\"mux\":true}}\n"
+              + "{\"id\":1,\"ok\":null}\n{\"id\":4,\"ok\":null}\n{\"id\":7,\"ok\":null}\n";
+          ByteArrayOutputStream out = new ByteArrayOutputStream();
+          Remote remote =
+              new Remote(new ByteArrayInputStream(heard.getBytes(UTF_8)), out, false, false, Optional.empty());
+          same(remote.run(Throws.run(leaving(() -> pure(null)))), new Throws.Ok<>(null));
+          same(asked(out), List.of("call 2", "cancel 2", "forget 1"));
+          // left through an effect: the failure's handler is inside the program, which so ends with a value
+          Condition no = new Condition("ValueError", "no");
+          same(kind(remote.run(Throws.run(leaving(() -> fit(Throws.raise(no)))))), "ValueError");
+          same(asked(out), List.of("call 2", "cancel 2", "forget 1", "call 4", "cancel 4", "forget 3"));
+          // the host throws: closed at once, before the exception is out of `run`
+          List<String> third = List.of("call 2", "cancel 2", "forget 1", "call 4", "cancel 4", "forget 3",
+              "call 6", "cancel 6", "forget 5");
+          refused(IllegalStateException.class, () -> remote.run(Throws.run(leaving(() -> {
+            throw new IllegalStateException("host");
+          }))));
+          same(asked(out), third);
+          // and nothing is left for a later run to close
+          same(remote.run(pure(1)), 1);
+          same(asked(out), third);
+        });
 
     test("mux: an answer that comes later, on another thread, does not hold the next", () -> {
       Worker.Module module = new Worker.Module(Map.of("slow", WireTests::slow, "fast", WireTests::fast), Map.of());

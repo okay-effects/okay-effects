@@ -2,14 +2,17 @@
 //! with what the other might say. The codecs have their tests beside them (src/wire/); the worker alone is held
 //! to the transcripts (tests/transcripts.rs).
 
+use std::cell::RefCell;
 use std::io::{Cursor, Write, sink};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 
 use okay_effects::effects::{Emit, Throws};
 use okay_effects::json::Json;
-use okay_effects::wire::{Asking, Condition, Failing, Far, Foreign, Remote, Streaming};
-use okay_effects::{Handler, K, Prog, pure};
+use okay_effects::wire::{Asking, Condition, Failing, Far, Foreign, Opening, Remote, Streaming};
+use okay_effects::{Comp, Handler, K, Prog, perform, pure};
 
 /// the demonstration, which `cargo test` builds beside this test: target/<profile>/examples/demo
 fn demo() -> PathBuf {
@@ -76,6 +79,68 @@ fn a_far_failure_is_raised_here_and_a_handler_of_this_side_decides() {
     // the far side lives on
     assert_eq!(on(&far, Far::call("t:add", ints([2, 3]))), Ok(Json::Int(5)));
     assert!(far.mux());
+}
+
+/// what a host writes, kept where a test reads it
+#[derive(Clone, Default)]
+struct Written(Rc<RefCell<Vec<u8>>>);
+
+impl Write for Written {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Written {
+    /// what the host has asked so far: each request's name, and the stream or the run it is about
+    fn asked(&self) -> Vec<String> {
+        let about = |request: &Json| match request.get("stream") {
+            Json::Null => request.get("run").to_string(),
+            stream => stream.to_string(),
+        };
+        let named = |request: Json| match request.get("op") {
+            Json::Str(name) => format!("{name} {}", about(&request)),
+            other => format!("{other} {}", about(&request)),
+        };
+        String::from_utf8_lossy(&self.0.borrow()).lines().map(|line| named(Json::parse(line).unwrap())).collect()
+    }
+}
+
+/// a run begun and a stream opened, both left open; then `end`
+fn leaving(end: impl FnOnce() -> Comp<(), Failing> + Clone + 'static) -> impl Prog<(), Failing> {
+    let opening = || Opening { name: "t:numbers".to_string(), args: Json::Arr(vec![]), credit: 1, input: None };
+    perform(Far::Run).then(move || perform(|r| Far::Open(opening(), r))).then(end)
+}
+
+#[test]
+fn a_run_closes_what_it_left_open_when_it_ends_when_it_is_left_through_an_effect_when_the_host_throws() {
+    // a far side that has said all it will say: its hello, and that each of three streams is open
+    let hello = r#"{"shim":9,"speaks":{"format":["json"],"mux":true}}"#;
+    let heard = format!("{hello}\n{{\"id\":1,\"ok\":null}}\n{{\"id\":4,\"ok\":null}}\n{{\"id\":7,\"ok\":null}}\n");
+    let out = Written::default();
+    let far = Remote::open(Cursor::new(heard), out.clone(), false, false, None);
+    let far = far.unwrap_or_else(|c| panic!("{}", c.message));
+    let mut all = vec!["call 2", "cancel 2", "forget 1"];
+    assert_eq!(on(&far, leaving(|| pure(()).boxed())), Ok(()));
+    assert_eq!(out.asked(), all);
+    // left through an effect: the failure's handler is inside the program, which so ends with a value
+    all.extend(["call 4", "cancel 4", "forget 3"]);
+    let failed = on(&far, leaving(|| Throws::raise(Condition::new("ValueError", "no")).boxed()));
+    assert_eq!(failed.map_err(|c| c.kind), Err("ValueError".to_string()));
+    assert_eq!(out.asked(), all);
+    // the host throws — in Rust, panics: closed at once, while the panic passes `run`
+    all.extend(["call 6", "cancel 6", "forget 5"]);
+    let thrown = catch_unwind(AssertUnwindSafe(|| on(&far, leaving(|| panic!("host")))));
+    assert!(thrown.is_err());
+    assert_eq!(out.asked(), all);
+    // and nothing is left for a later run to close
+    assert_eq!(far.run(pure(1)), 1);
+    assert_eq!(out.asked(), all);
 }
 
 #[test]

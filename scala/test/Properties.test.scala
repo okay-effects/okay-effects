@@ -656,6 +656,61 @@ class Properties extends munit.FunSuite:
         assertEquals(logged(step(asked.k.unwind)), (Step.Done[Account, Unit](()), List("closed")))
       case _ => fail("an operation was expected")
 
+  test("ensuring, an interceptor that unwinds: what a finalizer asks of its own effect reaches the handler outside"):
+    var seen = List.empty[String]
+    // an interceptor of the state that leaves at a put: the rest is unwound, then the state outside is read
+    def leaving(p: Int ! Counter): Int ! Counter =
+      okay.effects.scala.intercept(p, Handler.control[State % Int, Counter, Int, Int](pure)(
+        [X] => (op: State[Int, X], k: Continuation[X, Counter, Int]) =>
+          seen ::= op.toString
+          op match
+            case State.Put(_) => k.unwind.flatMap(_ => State.get[Int].map(_ + 100))
+            case State.Get() => State.get[Int].flatMap(s => k(s))))
+    val closing: Unit ! Counter = State.get[Int].flatMap(s => State.put(s + 9))
+    val body: Int ! Counter = State.put(1).flatMap(_ => said("not run").map(_ => 0))
+    // the finalizer read the 5 outside and wrote 14 there: the put of 1 never passed the interceptor
+    assertEquals(logged(run(State.run(5)(leaving(body.ensuring(closing))))), ((14, 114), Nil))
+    // the interceptor has left: it saw the put it left at, and nothing of the finalizer
+    assertEquals(seen, List("Put(1)"))
+
+  test("ensuring, a finalizer stopped at an operation of the handler that left: its own finalizer still runs"):
+    val failing: Int ! Throws % String = Throws.raise("no")
+    // the finalizer fails as the program did; that handler has left, under `handle`: nobody answers
+    val raised: Unit ! Throws % String = Throws.raise("again").flatMap(_ => said("not run"))
+    val closing: Unit ! Throws % String = said[Throws % String]("closing").flatMap(_ => raised).ensuring(said("inner"))
+    val p = failing.ensuring(closing.flatMap(_ => said("not run"))).ensuring(said("outer"))
+    // it ends at its operation, through its own finalizer; the unwinding goes on, and the first failure stands
+    assertEquals(logged(run(Throws.run(p))), (Left("no"), List("closing", "inner", "outer")))
+    // the same effect at another place of the row, its handler outside the one that left: answered there
+    type Two[X] = (Throws % String + Throws % String)[X]
+    val inner: Int ! Two = Throws.raise("no")
+    val other: Unit ! Two = Throws.raise("other").into[Two](using Place.init).flatMap(_ => said("not run"))
+    val q = inner.ensuring(other).ensuring(said("outer"))
+    assertEquals(logged(run(Throws.run(Throws.run(q)))), (Left("other"), List("outer")))
+
+  test("ensuring, `k` unwound twice, then resumed, a handler in place inside it: each from the state `k` took"):
+    type Kept[X] = (Account + State % Int)[X]
+    val saw: Unit ! Kept = State.get[Int].flatMap(s => said(s"saw $s").flatMap(_ => State.put(s + 1)))
+    val body: Int ! Kept = State.put(5).flatMap(_ => Account.deposit(1).flatMap(n => State.get[Int].map(_ + n)))
+    val p: (Int, Int) ! Account = State.run(0)(body.ensuring(saw))
+    val handler = Handler.control[Account, Pure, (Int, Int), (Int, Int)](pure)(
+      [X] => (op: Account[X], k: Continuation[X, Pure, (Int, Int)]) => op match
+        case Account.Deposit(n) => k.unwind.flatMap(_ => k.unwind).flatMap(_ => k(n + 1)))
+    // each finalizer saw the 5 that `k` holds, and wrote its 6 in a state of its own path; the last path's is kept
+    assertEquals(logged(run(handle(p, handler))), ((6, 7), List("saw 5", "saw 5", "saw 5")))
+
+  test("ensuring, the rest of a stepped program unwound twice, then resumed: its finalizers run each time"):
+    val p: Int ! Account = ensuring(Account.deposit(1).flatMap(n => said(s"got $n").map(_ => n)))(said("closed"))
+    def resumed[X](op: Account[X], k: Continuation[X, Account, Int]): Int ! Account = op match
+      case Account.Deposit(n) => k(n + 1)
+    step(p) match
+      case asked: Step.Asked[Account, ?, ?, Int] =>
+        assertEquals(logged(step(asked.k.unwind)), (Step.Done[Account, Unit](()), List("closed")))
+        assertEquals(logged(step(asked.k.unwind)), (Step.Done[Account, Unit](()), List("closed")))
+        val rest = asked.of[Account].map(the => resumed(the.op, the.k))
+        assertEquals(logged(rest.map(step)), (Some(Step.Done[Account, Int](2)), List("got 2", "closed")))
+      case _ => fail("an operation was expected")
+
   // ---- what a loop must not gather: the levels its continuations hold, counted — whatever the clock says
 
   type Sends[X] = (Emit % Int)[X]

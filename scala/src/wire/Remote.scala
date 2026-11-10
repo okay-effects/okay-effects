@@ -223,8 +223,9 @@ final class Remote(in: InputStream, out: OutputStream, cbor: Boolean = false, de
         send("credit", "stream" -> Json.Int(stream), "credit" -> Json.Int(1))
         Right(Some(message("chunk")))
 
-  /** THE PROGRAM RUN to its value, its far operations done on this wire. When it ends, what it left open on the far
-   * side is closed: its runs forgotten, its streams cancelled. Refs live on, until released. */
+  /** THE PROGRAM RUN to its value, its far operations done on this wire. When it ends — also when the host throws —
+   * what it left open on the far side is closed: its runs forgotten, its streams cancelled. Refs live on, until
+   * released. */
   def run[A](p: A ! Far): A =
     val handler = Handler.tail[Far, Pure, A, A](pure)([X] => (op: Far[X]) => op match
       case Far.Send(name, fields) =>
@@ -238,10 +239,15 @@ final class Remote(in: InputStream, out: OutputStream, cbor: Boolean = false, de
         numbers
       case call: Far.Open => open(call)
       case Far.Pull(stream) => pull(stream))
-    okay.effects.scala.run(handle(p.ensuring(closed), handler))
+    // The host's `finally`, and no `ensuring`: a finalizer is not run when the host throws, and has nothing more
+    // to see here. Nothing unwinds `p` from outside — its one effect is answered in place, below — and what
+    // leaves a part of it (a failure, a stream cut short) is handled inside it: `p` ends with a value, or the
+    // host throws.
+    try okay.effects.scala.run(handle(p, handler))
+    finally closed()
 
-  /** what a program left open on the far side, closed: its finalizer */
-  private def closed: Unit ! Far = pure:
+  /** what a program left open on the far side, closed */
+  private def closed(): Unit =
     streams.keys.foreach(stream => send("cancel", "stream" -> Json.Int(stream)))
     runs.foreach(run => send("forget", "run" -> Json.Int(run)))
     streams.clear()

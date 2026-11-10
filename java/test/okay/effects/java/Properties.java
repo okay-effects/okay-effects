@@ -201,11 +201,11 @@ final class Properties {
   }
 
   /** an account whose handler does with the deposit and the rest of the program what {@code on} says */
-  static <R> Comp<Integer, R> account(
-      BiFunction<Deposit, K<Integer, R>, Comp<Integer, R>> on, Comp<Integer, ? super Eff<Account, R>> p) {
-    return handle(Account.class, new Handler<Account, Integer, Integer, R>() {
-      public Comp<Integer, R> ret(Integer a) { return pure(a); }
-      public Comp<Integer, R> on(Account op, K<Integer, R> k) {
+  static <B, R> Comp<B, R> account(
+      BiFunction<Deposit, K<B, R>, Comp<B, R>> on, Comp<B, ? super Eff<Account, R>> p) {
+    return handle(Account.class, new Handler<Account, B, B, R>() {
+      public Comp<B, R> ret(B a) { return pure(a); }
+      public Comp<B, R> on(Account op, K<B, R> k) {
         return switch (op) {
           case Deposit deposit -> on.apply(deposit, k);
         };
@@ -300,6 +300,59 @@ final class Properties {
     Comp<Void, Eff<Throws<String>, Eff<State<Integer>, ?>>> failing =
         up(State.put(1)).flatMap(done -> Throws.raise("no"));
     return failing.ensuring(() -> up(State.put(2)));
+  }
+
+  /** an interceptor at the state's place in the row ({@code handle(.., under(p))}) that leaves at a put: the rest
+   * is unwound, keeping the effect in the row ({@code K.unwindKeeping}); then the state outside is read */
+  static <T> Comp<Integer, Eff<State<Integer>, T>> leaving(
+      List<String> seen, Comp<Integer, ? super Eff<State<Integer>, T>> p) {
+    return handle(State.class, new Handler<State<Integer>, Integer, Integer, Eff<State<Integer>, T>>() {
+      public Comp<Integer, Eff<State<Integer>, T>> ret(Integer a) { return pure(a); }
+      public Comp<Integer, Eff<State<Integer>, T>> on(State<Integer> op, K<Integer, Eff<State<Integer>, T>> k) {
+        seen.add(op.toString());
+        return switch (op) {
+          case State.Put<Integer> put ->
+              K.unwindKeeping(k, put).then(() -> State.<Integer>get().map(s -> s + 100));
+          case State.Get<Integer> get -> perform(get).flatMap(s -> k.resume(get, s));
+        };
+      }
+    }, under(p));
+  }
+
+  /** an interceptor found by the class that leaves at the number asked: the rest is unwound, then a number is
+   * asked outside */
+  static <R extends Eff<Fresh, ?>> Comp<Long, R> leavingFresh(List<String> seen, Comp<Long, ? super R> p) {
+    return intercept(Fresh.class, new Handler<Fresh, Long, Long, R>() {
+      public Comp<Long, R> ret(Long a) { return pure(a); }
+      public Comp<Long, R> on(Fresh op, K<Long, R> k) {
+        seen.add(op.toString());
+        return switch (op) {
+          case Fresh.Next next -> k.unwind().then(() -> perform(next)).map(n -> n + 100);
+        };
+      }
+    }, p);
+  }
+
+  /** a finalizer that fails, and has a finalizer of its own */
+  static Comp<Void, Eff<Throws<String>, ?>> closing() {
+    return Properties.<Eff<Throws<String>, ?>>said("closing")
+        .then(() -> Throws.<String, Void>raise("again")).then(() -> said("not run"))
+        .ensuring(() -> said("inner"));
+  }
+
+  /** a failure, and a finalizer that fails at the next place of the row: the same effect, its handler outside */
+  static Comp<Integer, Eff<Throws<String>, ? extends Eff<Throws<String>, ?>>> closingAtTheNext() {
+    Comp<Integer, Eff<Throws<String>, ? extends Eff<Throws<String>, ?>>> failing = fit(Throws.raise("no"));
+    return failing.ensuring(() -> up(Throws.<String, Void>raise("other")).then(() -> said("not run")))
+        .ensuring(() -> said("outer"));
+  }
+
+  /** a state put to 5 and a deposit, under a finalizer that sees the state: the state's handler inside the
+   * account's */
+  static Comp<Integer, Eff<State<Integer>, Eff<Account, ?>>> depositedOver() {
+    Comp<Integer, Eff<State<Integer>, Eff<Account, ?>>> body = State.put(5).flatMap(done ->
+        up(perform(new Deposit(1))).flatMap(n -> State.<Integer>get().map(s -> s + n)));
+    return body.ensuring(() -> saw());
   }
 
   public static void main(String[] args) {
@@ -634,6 +687,62 @@ final class Properties {
           if (!(step(deposited()) instanceof Step.Asked<?, Integer, ?> asked)) throw new AssertionError("no operation");
           same(told(() -> step(asked.k().unwind())), new Pair<>(new Step.Done<>(null), List.of("closed")));
         });
+
+    test("ensuring, an interceptor that unwinds: what a finalizer asks of its own effect reaches the handler outside",
+        () -> {
+          // Scala's interceptor is of a place of the row. Java's `intercept` is by the class, and refuses an effect
+          // with type arguments, as the state is: here the interceptor at a place is `handle(.., under(p))`, and
+          // it leaves with `K.unwindKeeping`
+          List<String> seen = new ArrayList<>();
+          Comp<Integer, Eff<State<Integer>, ?>> body = State.put(1).then(() -> said("not run").map(done -> 0));
+          Comp<Integer, Eff<State<Integer>, ?>> p =
+              body.ensuring(() -> State.<Integer>get().flatMap(s -> State.put(s + 9)));
+          // the finalizer read the 5 outside and wrote 14 there: the put of 1 never passed the interceptor
+          same(told(() -> run(State.run(5, leaving(seen, p)))), new Pair<>(new State.Final<>(14, 114), List.of()));
+          // the interceptor has left: it saw the put it left at, and nothing of the finalizer
+          same(seen, List.of("Put[value=1]"));
+          // by the class, of an effect with no type arguments: `k.unwind()` leaves nothing where the interceptor
+          // was, and the finalizer's number is the handler's outside
+          List<String> numbers = new ArrayList<>();
+          Comp<Long, Eff<Fresh, ?>> asking = Fresh.fresh().flatMap(n -> said("not run").map(done -> n))
+              .ensuring(() -> Fresh.fresh().flatMap(n -> said("fresh " + n)));
+          same(told(() -> run(Fresh.run(leavingFresh(numbers, asking)))), new Pair<>(101L, List.of("fresh 0")));
+          same(numbers, List.of("Next[]"));
+        });
+
+    test("ensuring, a finalizer stopped at an operation of the handler that left: its own finalizer still runs",
+        () -> {
+          // the finalizer fails as the program did; that handler has left, under `handle`: nobody answers
+          Comp<Integer, Eff<Throws<String>, ?>> p = raised()
+              .ensuring(() -> closing().then(() -> said("not run"))).ensuring(() -> said("outer"));
+          // it ends at its operation, through its own finalizer; the unwinding goes on, and the first failure stands
+          same(told(() -> run(Throws.run(p))),
+              new Pair<>(new Throws.Err<>("no"), List.of("closing", "inner", "outer")));
+          // the same effect at another place of the row, its handler outside the one that left: answered there
+          same(told(() -> run(Throws.run(Throws.run(closingAtTheNext())))),
+              new Pair<>(new Throws.Err<>("other"), List.of("outer")));
+        });
+
+    test("ensuring, `k` unwound twice, then resumed, a handler in place inside it: each from the state `k` took",
+        () -> {
+          Comp<State.Final<Integer, Integer>, Pure> handled = account((deposit, k) ->
+              k.unwind().then(() -> k.unwind()).then(() -> k.resume(deposit, deposit.amount() + 1)),
+              State.run(0, depositedOver()));
+          // each finalizer saw the 5 that `k` holds, and wrote its 6 in a state of its own path; the last path's
+          // is kept
+          same(told(() -> run(handled)), new Pair<>(new State.Final<>(6, 7), List.of("saw 5", "saw 5", "saw 5")));
+        });
+
+    test("ensuring, the rest of a stepped program unwound twice, then resumed: its finalizers run each time", () -> {
+      Comp<Integer, Eff<Account, ?>> p = perform(new Deposit(1))
+          .flatMap(n -> said("got " + n).map(done -> n)).ensuring(() -> said("closed"));
+      Step<Integer, Eff<Account, ?>> at = step(p);
+      if (!(at instanceof Step.Asked<?, Integer, ?> asked)) throw new AssertionError("no operation");
+      same(told(() -> step(asked.k().unwind())), new Pair<>(new Step.Done<>(null), List.of("closed")));
+      same(told(() -> step(asked.k().unwind())), new Pair<>(new Step.Done<>(null), List.of("closed")));
+      int amount = asked.op() instanceof Deposit deposit ? deposit.amount() : -1;
+      same(told(() -> resumed(at, amount + 1)), new Pair<>(new Step.Done<>(2), List.of("got 2", "closed")));
+    });
 
     test("a thousand random programs: the reference machine's digest", () -> same(Tck.digest(), Tck.DIGEST));
 

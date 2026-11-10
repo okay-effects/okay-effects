@@ -399,8 +399,9 @@ impl Remote {
         self.0.borrow().mux
     }
 
-    /// THE PROGRAM RUN to its value, its far operations done on this wire. When it ends, what it left open on the
-    /// far side is closed: its runs forgotten, its streams cancelled. Refs live on, until released.
+    /// THE PROGRAM RUN to its value, its far operations done on this wire. When it ends — also when the host
+    /// panics — what it left open on the far side is closed: its runs forgotten, its streams cancelled. Refs live
+    /// on, until released.
     pub fn run<A: 'static>(&self, p: impl Prog<A, eff![Far]>) -> A {
         let wire = self.0.clone();
         let answer = move |_: &mut (), op| {
@@ -422,7 +423,18 @@ impl Remote {
                 Far::Pull(stream, r) => r.give(wire.pull(stream)),
             }
         };
-        let value = Handler::in_place((), |_, a| pure(a), answer).handle(p).run();
+        // closed when this is dropped: at the program's value, and when a panic of the host passes
+        let _closing = Closing(&self.0);
+        Handler::in_place((), |_, a| pure(a), answer).handle(p).run()
+    }
+}
+
+/// What a program left open on the far side, closed when its run is left — by a `Drop`, so that a panic of the
+/// host closes it too.
+struct Closing<'a>(&'a RefCell<Wire>);
+
+impl Drop for Closing<'_> {
+    fn drop(&mut self) {
         let mut wire = self.0.borrow_mut();
         for stream in std::mem::take(&mut wire.streams).into_keys() {
             wire.send("cancel", vec![("stream", Json::Int(stream))]);
@@ -431,7 +443,6 @@ impl Remote {
             wire.send("forget", vec![("run", Json::Int(run))]);
         }
         wire.feeds.clear();
-        value
     }
 }
 
