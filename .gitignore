@@ -1,0 +1,5 @@
+.scala-build/
+.bsp/
+target/
+out/
+.idea/
