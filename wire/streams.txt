@@ -1,0 +1,73 @@
+# THE WIRE, STREAMS: a call opened as a stream is answered at once; its chunks follow under CREDIT, then its end
+# or its condition. A stream the host feeds into the call goes the other way under the far side's credit
+# (wire/README.md). Format as in calls.txt; the lines of a stream carry no id.
+#
+# ---- a stream the far side feeds: two chunks of credit, so two chunks, and it waits
+< {"shim": 9, "python": "*", "speaks": {"format": ["json", "cbor"], "compress": ["deflate"], "mux": true}}
+> {"id": 1, "op": "call", "fn": "t:numbers", "args": [5], "stream": 1, "credit": 2}
+< {"id": 1, "ok": null}
+< {"stream": 1, "chunk": 1}
+< {"stream": 1, "chunk": 2}
+# one more credit, one more chunk; credit past the end, the last chunks and the end
+> {"id": 2, "op": "credit", "stream": 1, "credit": 1}
+< {"id": 2, "ok": null}
+< {"stream": 1, "chunk": 3}
+> {"id": 3, "op": "credit", "stream": 1, "credit": 5}
+< {"id": 3, "ok": null}
+< {"stream": 1, "chunk": 4}
+< {"stream": 1, "chunk": 5}
+< {"stream": 1, "end": true}
+> {"id": 4, "op": "call", "fn": "t:sent", "args": []}
+< {"id": 4, "ok": 5}
+#
+# ---- no credit, no chunk; cancel: the function is not resumed, and later credit is for nothing
+> {"id": 5, "op": "call", "fn": "t:numbers", "args": [100], "stream": 2, "credit": 0}
+< {"id": 5, "ok": null}
+> {"id": 6, "op": "credit", "stream": 2, "credit": 1}
+< {"id": 6, "ok": null}
+< {"stream": 2, "chunk": 1}
+> {"id": 7, "op": "cancel", "stream": 2}
+< {"id": 7, "ok": null}
+> {"id": 8, "op": "credit", "stream": 2, "credit": 9}
+< {"id": 8, "ok": null}
+> {"id": 9, "op": "call", "fn": "t:sent", "args": []}
+< {"id": 9, "ok": 1}
+#
+# ---- both ways at once: stream 3 out, the host's stream -3 in; each value the function takes gives the host
+# one more credit, sent before what the function does with the value
+> {"id": 10, "op": "call", "fn": "t:dedup", "args": [], "stream": 3, "credit": 2, "input": {"id": -3, "credit": 2}}
+< {"id": 10, "ok": null}
+> {"id": 11, "op": "chunk", "stream": -3, "chunk": 3}
+< {"id": 11, "ok": null}
+< {"stream": -3, "credit": 1}
+< {"stream": 3, "chunk": 3}
+> {"id": 12, "op": "chunk", "stream": -3, "chunk": 3}
+< {"id": 12, "ok": null}
+< {"stream": -3, "credit": 1}
+> {"id": 13, "op": "chunk", "stream": -3, "chunk": 1}
+< {"id": 13, "ok": null}
+< {"stream": -3, "credit": 1}
+< {"stream": 3, "chunk": 1}
+# the far side's credit is spent: the third new value waits for it, and so does the function
+> {"id": 14, "op": "chunk", "stream": -3, "chunk": {"t": "f", "v": 2.0}}
+< {"id": 14, "ok": null}
+< {"stream": -3, "credit": 1}
+> {"id": 15, "op": "end", "stream": -3}
+< {"id": 15, "ok": null}
+> {"id": 16, "op": "credit", "stream": 3, "credit": 1}
+< {"id": 16, "ok": null}
+< {"stream": 3, "chunk": {"t": "f", "v": 2.0}}
+< {"stream": 3, "end": true}
+#
+# ---- a stream that fails ends with its condition; a call that is no stream cannot send
+> {"id": 17, "op": "call", "fn": "t:boom", "args": [], "stream": 4, "credit": 1}
+< {"id": 17, "ok": null}
+< {"stream": 4, "condition": {"kind": "ValueError", "message": "no"}}
+> {"id": 18, "op": "call", "fn": "t:nothing", "args": [], "stream": 5, "credit": 1}
+< {"id": 18, "condition": {"kind": "LookupError", "message": "*"}}
+> {"id": 19, "op": "call", "fn": "t:numbers", "args": [1]}
+< {"id": 19, "condition": {"kind": "LookupError", "message": "*"}}
+# a function that takes from no stream finds its end at once
+> {"id": 20, "op": "call", "fn": "t:dedup", "args": [], "stream": 6, "credit": 1}
+< {"id": 20, "ok": null}
+< {"stream": 6, "end": true}

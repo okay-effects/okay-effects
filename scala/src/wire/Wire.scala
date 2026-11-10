@@ -1,94 +1,158 @@
 package okay.effects.scala.wire
 
 import okay.effects.scala.*
-import java.io.{BufferedReader, InputStreamReader, PrintStream}
-import scala.collection.mutable
+import java.io.{BufferedInputStream, BufferedOutputStream, ByteArrayOutputStream, InputStream, OutputStream}
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets.UTF_8
+import java.util.zip.{Deflater, Inflater}
 
 /** THE OPERATION THAT CROSSES a process: a name and arguments in JSON, answered in JSON. A program written over it
  * runs in one process, in one language; its handlers may be in another. Only this data crosses — a continuation
- * stays where it was made, known outside by a number. The messages are the okay wire's (SPEC.md, "The wire"). */
+ * stays where it was made, known outside by a number. The messages are the okay wire's (wire/README.md). */
 sealed trait Foreign
 final case class Call(name: String, args: List[Json]) extends Foreign, Op[Foreign, Json]
 
 def call(name: String, args: Json*): Json ! Foreign = perform(Call(name, args.toList))
 
-/** The far side's failure, by name. */
-final class Condition(val kind: String, message: String) extends RuntimeException(s"$kind: $message")
+/** A failure that crosses, by name: raised on one side, handled on the other (`Throws[Condition]`). */
+final case class Condition(kind: String, message: String) extends RuntimeException(s"$kind: $message")
 
 val Shim = 9L
 
-/** THE FAR SIDE: programs by name, run a step at a time for a host; their continuations kept until forgotten. */
-object Worker:
-  type Programs = Map[String, List[Json] => Json ! Foreign]
+/** THE VALUE ESCAPES: what a JSON tree cannot say of a value, said by an object tagged `t`. A value is escaped as
+ * it leaves and read back as it comes; the messages around it are plain JSON. */
+object Escapes:
+  /** integers are exact in every JSON reader only below this */
+  private val Exact = 1L << 53
 
-  def serve(programs: Programs, in: BufferedReader = BufferedReader(InputStreamReader(System.in)),
-      out: PrintStream = System.out): Unit =
-    val kept = mutable.Map.empty[(Long, Long), Json => Json ! Foreign]
-    var counter = 0L
+  def enc(value: Json): Json = value match
+    case Json.Int(n) if n <= -Exact || n >= Exact => Json.obj("t" -> Json.Str("int"), "v" -> Json.Str(n.toString))
+    case Json.Dec(x) if x.isNaN => Json.obj("t" -> Json.Str("nan"))
+    case Json.Dec(x) if x.isInfinite => throw Condition("ValueError", "an infinity does not cross the wire")
+    // a whole float would come back an integer: the tag keeps 3.0 a float
+    case Json.Dec(x) if x == math.rint(x) && x.abs < 1e15 => Json.obj("t" -> Json.Str("f"), "v" -> value)
+    case Json.Arr(values) => Json.Arr(values.map(enc))
+    case Json.Obj(fields) =>
+      val pairs = fields.map((name, field) => Json.Arr(List(Json.Str(name), enc(field))))
+      Json.obj("t" -> Json.Str("dict"), "kv" -> Json.Arr(pairs))
+    case Json.Ref(id, kind) => Json.obj("t" -> Json.Str("ref"), "id" -> Json.Int(id), "type" -> Json.Str(kind))
+    case plain => plain
 
-    def node(run: Long, p: Json ! Foreign): Json = step(p) match
-      case Step.Done(value) => Json.obj("ok" -> Json.obj("done" -> value))
-      case Step.Asked(Call(name, args), k) =>
-        counter += 1
-        kept((run, counter)) = k
-        Json.obj("ok" -> Json.obj("perform" -> Json.Str(name), "args" -> Json.Arr(args), "k" -> Json.Int(counter)))
-      case Step.Asked(op, _) => throw NoHandler(op)
+  def dec(tree: Json): Json = tree match
+    case Json.Arr(values) => Json.Arr(values.map(dec))
+    case Json.Obj(fields) => (tree("t"), tree("v")) match
+      case (Json.Str("dict"), _) =>
+        Json.Obj(items(tree("kv")).collect { case Json.Arr(List(Json.Str(name), field)) => (name, dec(field)) })
+      case (Json.Str("int"), Json.Str(digits)) => Json.Int(digits.toLong)
+      case (Json.Str("f"), Json.Int(n)) => Json.Dec(n.toDouble)
+      case (Json.Str("f"), whole) => whole
+      case (Json.Str("nan"), _) => Json.Dec(Double.NaN)
+      case (Json.Str("na"), _) => Json.Null
+      case (Json.Str("ref"), _) => (tree("id"), tree("type")) match
+        case (Json.Int(id), Json.Str(kind)) => Json.Ref(id, kind)
+        case (Json.Int(id), _) => Json.Ref(id, "")
+        case _ => throw Condition("ValueError", s"a ref without a number: $tree")
+      case (Json.Str(tag), _) => throw Condition("ValueError", s"unknown tagged value: $tag")
+      // an object with no tag is a dict too: some far sides send theirs plain
+      case _ => Json.Obj(fields.map((name, field) => (name, dec(field))))
+    case plain => plain
 
-    def condition(kind: String, message: String): Json =
-      Json.obj("condition" -> Json.obj("kind" -> Json.Str(kind), "message" -> Json.Str(message)))
+  /** the values of an array; none of anything else */
+  def items(tree: Json): List[Json] = tree match
+    case Json.Arr(values) => values
+    case _ => Nil
 
-    def answer(m: Json): Json = (m("op"), m("run"), m("fn"), m("k")) match
-      case (Json.Str("program"), Json.Int(run), Json.Str(fn), _) =>
-        val args = m("args") match { case Json.Arr(values) => values; case _ => Nil }
-        programs.get(fn).fold(condition("LookupError", s"no program $fn"))(program => node(run, program(args)))
-      case (Json.Str("continue"), Json.Int(run), _, Json.Int(k)) =>
-        kept.get((run, k)).fold(condition("LookupError", s"no continuation $k of run $run"))(rest =>
-          node(run, rest(m("answer"))))
-      case (Json.Str("forget"), Json.Int(run), _, _) =>
-        kept.filterInPlace((key, _) => key._1 != run)
-        Json.obj("ok" -> Json.Null)
-      case (op, _, _, _) => condition("LookupError", s"no operation $op")
+/** ONE END OF THE WIRE: messages out, messages in. JSON lines at first; after a `configure` to anything else,
+ * FRAMES — a 4-byte big-endian length, then the message: JSON text or CBOR, raw DEFLATE over it when asked. */
+final class Link(in0: InputStream, out0: OutputStream):
+  private val in = BufferedInputStream(in0)
+  private val out = BufferedOutputStream(out0)
+  private var cbor, deflate = false
 
-    out.println(Json.obj("shim" -> Json.Int(Shim), "scala" -> Json.Str("okay-algebraic 0.1.0"),
-      "speaks" -> Json.obj("format" -> Json.Arr(List(Json.Str("json"))))))
-    Iterator.continually(in.readLine()).takeWhile(_ != null).filter(_.nonEmpty).foreach: line =>
-      val m = Json.parse(line)
-      val reply =
-        try answer(m)
-        catch case e: Exception => condition(e.getClass.getSimpleName, String.valueOf(e.getMessage))
-      reply match
-        case Json.Obj(fields) => out.println(Json.Obj(("id" -> m("id")) :: fields))
-        case other => out.println(other)
+  def configure(cbor: Boolean, deflate: Boolean): Unit =
+    this.cbor = cbor
+    this.deflate = deflate
 
-/** THE HOST'S VIEW of a far side: a process speaking the wire on its standard input and output. A program of it is a
- * program here — what it asks is asked here as a `Call`, and answered by this side's handlers. */
-final class Remote(command: String*) extends AutoCloseable:
-  private val process = ProcessBuilder(command*).redirectError(ProcessBuilder.Redirect.INHERIT).start()
-  private val in = process.inputReader()
-  private val out = PrintStream(process.getOutputStream, true)
-  private var ids, runs = 0L
+  def send(message: Json): Unit =
+    if !cbor && !deflate then out.write((message.toString + "\n").getBytes(UTF_8))
+    else
+      val plain = if cbor then Cbor.encode(message) else message.toString.getBytes(UTF_8)
+      val bytes = if deflate then Link.deflated(plain) else plain
+      out.write(ByteBuffer.allocate(4).putInt(bytes.length).array)
+      out.write(bytes)
+    out.flush()
 
-  private val hello = Json.parse(in.readLine())
-  if hello("shim") != Json.Int(Shim) then throw Condition("Shim", s"the far side said $hello")
+  /** the next message; none when the other end has closed */
+  def receive(): Option[Json] =
+    if !cbor && !deflate then line().map(Json.parse)
+    else frame().map: bytes =>
+      val plain = if deflate then Link.inflated(bytes) else bytes
+      if cbor then Cbor.decode(plain) else Json.parse(String(plain, UTF_8))
 
-  private def ask(op: String, fields: (String, Json)*): Json =
-    ids += 1
-    out.println(Json.Obj(("id" -> Json.Int(ids)) :: ("op" -> Json.Str(op)) :: fields.toList))
-    val reply = Json.parse(in.readLine())
-    reply("condition") match
-      case Json.Null => reply("ok")
-      case failed => throw Condition(failed("kind").toString, failed("message").toString)
+  private def line(): Option[String] =
+    val bytes = ByteArrayOutputStream()
+    var byte = in.read()
+    while byte >= 0 && byte != '\n' do
+      bytes.write(byte)
+      byte = in.read()
+    val text = bytes.toString(UTF_8).trim
+    if text.nonEmpty then Some(text) else if byte < 0 then None else line()
 
-  /** the far side's program `fn`, as a program of this side */
-  def program(fn: String, args: Json*): Json ! Foreign = defer:
-    runs += 1
-    val run = Json.Int(runs)
-    node(run, ask("program", "run" -> run, "fn" -> Json.Str(fn), "args" -> Json.Arr(args.toList)))
+  private def frame(): Option[Array[Byte]] =
+    val length = in.readNBytes(4)
+    if length.length < 4 then None
+    else
+      val bytes = in.readNBytes(ByteBuffer.wrap(length).getInt)
+      // a frame cut short is the end of the wire, as a line cut short is
+      if bytes.length < ByteBuffer.wrap(length).getInt then None else Some(bytes)
 
-  private def node(run: Json, ok: Json): Json ! Foreign = (ok("perform"), ok("args")) match
-    case (Json.Str(name), Json.Arr(args)) =>
-      perform(Call(name, args)).flatMap(answer => node(run, ask("continue", "run" -> run, "k" -> ok("k"),
-        "answer" -> answer)))
-    case _ => pure(ok("done"))
+object Link:
+  /** raw DEFLATE (RFC 1951): no zlib header, no checksum */
+  def deflated(bytes: Array[Byte]): Array[Byte] =
+    val deflater = Deflater(Deflater.DEFAULT_COMPRESSION, true)
+    deflater.setInput(bytes)
+    deflater.finish()
+    val out = ByteArrayOutputStream()
+    val buffer = new Array[Byte](8192)
+    while !deflater.finished() do out.write(buffer, 0, deflater.deflate(buffer))
+    deflater.end()
+    out.toByteArray
 
-  def close(): Unit = process.destroy()
+  def inflated(bytes: Array[Byte]): Array[Byte] =
+    val inflater = Inflater(true)
+    inflater.setInput(bytes)
+    val out = ByteArrayOutputStream()
+    val buffer = new Array[Byte](8192)
+    try
+      while !inflater.finished() do
+        val n = inflater.inflate(buffer)
+        if n == 0 && !inflater.finished() && inflater.needsInput() then
+          throw IllegalArgumentException("DEFLATE: the message is cut short")
+        out.write(buffer, 0, n)
+    catch case e: java.util.zip.DataFormatException => throw IllegalArgumentException(s"DEFLATE: ${e.getMessage}")
+    finally inflater.end()
+    out.toByteArray
+
+/** THE AUTHENTICATION of a wire, optional: each side proves it holds the secret, by an HMAC-SHA256 over both sides'
+ * nonces, and neither sends it. */
+object Auth:
+  /** the proof of `who` — the far side is `server`, the host `client` — over the two nonces */
+  def mac(secret: String, who: String, farNonce: String, hostNonce: String): String =
+    hmac(secret, s"okay-wire $who|$farNonce|$hostNonce")
+
+  /** HMAC-SHA256 of the text under the secret, in hex */
+  def hmac(secret: String, text: String): String =
+    val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+    mac.init(javax.crypto.spec.SecretKeySpec(secret.getBytes(UTF_8), "HmacSHA256"))
+    hex(mac.doFinal(text.getBytes(UTF_8)))
+
+  /** 16 random bytes, in hex */
+  def nonce(): String =
+    val bytes = new Array[Byte](16)
+    java.security.SecureRandom().nextBytes(bytes)
+    hex(bytes)
+
+  /** equal, in a time that does not say how much of a guess was right */
+  def same(a: String, b: String): Boolean = java.security.MessageDigest.isEqual(a.getBytes(UTF_8), b.getBytes(UTF_8))
+
+  private def hex(bytes: Array[Byte]): String = bytes.map(byte => f"${byte & 0xff}%02x").mkString

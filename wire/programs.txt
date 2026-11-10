@@ -1,0 +1,49 @@
+# THE WIRE, PROGRAMS: a far program run a step at a time; a continuation kept under (run, k) until the run is
+# forgotten, and continued as often as the host likes (wire/README.md). Format as in calls.txt.
+#
+# ---- program: its first node; the SAME k continued twice (multi-shot); `callbacks` is heard and not needed
+< {"shim": 9, "python": "*", "speaks": {"format": ["json", "cbor"], "compress": ["deflate"], "mux": true}}
+> {"id": 1, "op": "program", "run": 1, "fn": "t:pairs", "args": [], "callbacks": ["choose"]}
+< {"id": 1, "ok": {"perform": "choose", "args": [[1, 2]], "k": 1}}
+> {"id": 2, "op": "continue", "run": 1, "k": 1, "answer": 1}
+< {"id": 2, "ok": {"done": 10}}
+> {"id": 3, "op": "continue", "run": 1, "k": 1, "answer": 2}
+< {"id": 3, "ok": {"done": 20}}
+#
+# ---- two runs at once: each `perform` gets the next k of the far side; an answer may be any value
+> {"id": 4, "op": "program", "run": 2, "fn": "shop:total", "args": ["tea", "milk"]}
+< {"id": 4, "ok": {"perform": "price_of", "args": ["tea"], "k": 2}}
+> {"id": 5, "op": "program", "run": 3, "fn": "t:quote", "args": ["tea"]}
+< {"id": 5, "ok": {"perform": "price_of", "args": ["tea"], "k": 3}}
+> {"id": 6, "op": "continue", "run": 2, "k": 2, "answer": 3}
+< {"id": 6, "ok": {"perform": "price_of", "args": ["milk"], "k": 4}}
+> {"id": 7, "op": "continue", "run": 3, "k": 3, "answer": 4.25}
+< {"id": 7, "ok": {"done": 8.5}}
+> {"id": 8, "op": "continue", "run": 2, "k": 4, "answer": 2}
+< {"id": 8, "ok": {"done": 5}}
+#
+# ---- a program that asks nothing is done at once; one that fails answers its condition
+> {"id": 9, "op": "program", "run": 4, "fn": "t:add", "args": [2, 3]}
+< {"id": 9, "ok": {"done": 5}}
+> {"id": 10, "op": "program", "run": 4, "fn": "t:boom", "args": []}
+< {"id": 10, "condition": {"kind": "ValueError", "message": "no"}}
+> {"id": 11, "op": "program", "run": 4, "fn": "t:nothing", "args": []}
+< {"id": 11, "condition": {"kind": "LookupError", "message": "*"}}
+#
+# ---- a program as data is continued with an answer: a condition in its place is refused
+> {"id": 12, "op": "continue", "run": 1, "k": 1, "condition": {"kind": "ValueError", "message": "no price"}}
+< {"id": 12, "condition": {"kind": "ValueError", "message": "*"}}
+#
+# ---- forget: the run's continuations are dropped, the other runs' are not
+> {"id": 13, "op": "forget", "run": 1}
+< {"id": 13, "ok": null}
+> {"id": 14, "op": "continue", "run": 1, "k": 1, "answer": 2}
+< {"id": 14, "condition": {"kind": "LookupError", "message": "*"}}
+> {"id": 15, "op": "continue", "run": 2, "k": 2, "answer": 10}
+< {"id": 15, "ok": {"perform": "price_of", "args": ["milk"], "k": 5}}
+> {"id": 16, "op": "forget", "run": 99}
+< {"id": 16, "ok": null}
+#
+# ---- a call offers no callbacks: a function that asks one is refused
+> {"id": 17, "op": "call", "fn": "t:pairs", "args": []}
+< {"id": 17, "condition": {"kind": "LookupError", "message": "*"}}

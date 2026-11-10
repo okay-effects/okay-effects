@@ -1,0 +1,82 @@
+# THE WIRE, CALLS: functions by name, answers held as refs, objects, values, failures (wire/README.md).
+# `>` host to far side, `<` far side to host, one JSON object a line, compared as JSON; a string "*" in an
+# expected line matches any value. The far side serves the demonstration's module and speaks first.
+#
+# ---- call: a function by name
+< {"shim": 9, "python": "*", "speaks": {"format": ["json", "cbor"], "compress": ["deflate"], "mux": true}}
+> {"id": 1, "op": "call", "fn": "t:add", "args": [2, 3]}
+< {"id": 1, "ok": 5}
+#
+# ---- call, held: an object stays on the far side, a ref comes back; its method, its attribute
+> {"id": 2, "op": "call", "fn": "t:counter", "args": [10], "held": true}
+< {"id": 2, "ok": {"t": "ref", "id": 1, "type": "t.Counter"}}
+> {"id": 3, "op": "call", "fn": {"ref": 1, "method": "inc"}, "args": [5]}
+< {"id": 3, "ok": 15}
+> {"id": 4, "op": "call", "fn": {"ref": 1, "attr": "n"}, "args": []}
+< {"id": 4, "ok": 15}
+# an object crosses only as a ref; it has only the methods and attributes it has; it is not an argument
+> {"id": 5, "op": "call", "fn": "t:counter", "args": [10]}
+< {"id": 5, "condition": {"kind": "TypeError", "message": "*"}}
+> {"id": 6, "op": "call", "fn": {"ref": 1, "method": "dec"}, "args": [5]}
+< {"id": 6, "condition": {"kind": "LookupError", "message": "*"}}
+> {"id": 7, "op": "call", "fn": {"ref": 1, "attr": "m"}, "args": []}
+< {"id": 7, "condition": {"kind": "LookupError", "message": "*"}}
+> {"id": 8, "op": "call", "fn": "t:echo", "args": [{"t": "ref", "id": 1}]}
+< {"id": 8, "condition": {"kind": "TypeError", "message": "*"}}
+#
+# ---- call, held: a value stays too; its ref, given to a call, is the value again — at any depth
+> {"id": 9, "op": "call", "fn": "t:echo", "args": [[1, 2, 3]], "held": true}
+< {"id": 9, "ok": {"t": "ref", "id": 2, "type": "list"}}
+> {"id": 10, "op": "call", "fn": "t:sum", "args": [{"t": "ref", "id": 2}]}
+< {"id": 10, "ok": 6}
+> {"id": 11, "op": "call", "fn": "t:echo", "args": [[{"t": "ref", "id": 2}, 4]]}
+< {"id": 11, "ok": [[1, 2, 3], 4]}
+> {"id": 12, "op": "call", "fn": {"ref": 2, "attr": "n"}, "args": []}
+< {"id": 12, "condition": {"kind": "LookupError", "message": "*"}}
+> {"id": 13, "op": "call", "fn": "t:echo", "args": [{"a": 1}], "held": true}
+< {"id": 13, "ok": {"t": "ref", "id": 3, "type": "dict"}}
+> {"id": 14, "op": "call", "fn": "t:add", "args": [2, 3], "held": true}
+< {"id": 14, "ok": {"t": "ref", "id": 4, "type": "value"}}
+#
+# ---- release: what a ref names is dropped; the ref is refused by name after; releasing again is no failure
+> {"id": 15, "op": "release", "ref": 1}
+< {"id": 15, "ok": null}
+> {"id": 16, "op": "call", "fn": {"ref": 1, "attr": "n"}, "args": []}
+< {"id": 16, "condition": {"kind": "LookupError", "message": "*"}}
+> {"id": 17, "op": "call", "fn": "t:sum", "args": [{"t": "ref", "id": 1}]}
+< {"id": 17, "condition": {"kind": "LookupError", "message": "*"}}
+> {"id": 18, "op": "release", "ref": 1}
+< {"id": 18, "ok": null}
+#
+# ---- a failure is a condition by kind and message; the far side lives on
+> {"id": 19, "op": "call", "fn": "t:boom", "args": []}
+< {"id": 19, "condition": {"kind": "ValueError", "message": "no"}}
+> {"id": 20, "op": "call", "fn": "t:nothing", "args": []}
+< {"id": 20, "condition": {"kind": "LookupError", "message": "*"}}
+> {"id": 21, "op": "call", "fn": "t:add", "args": ["two", 3]}
+< {"id": 21, "condition": {"kind": "TypeError", "message": "*"}}
+> {"id": 22, "op": "dance"}
+< {"id": 22, "condition": {"kind": "ValueError", "message": "*"}}
+> this line is not JSON
+< {"id": null, "condition": {"kind": "ValueError", "message": "*"}}
+> {"id": 23, "op": "call", "fn": "t:add", "args": [2, 3]}
+< {"id": 23, "ok": 5}
+#
+# ---- the value escapes, there and back: an integer past 2^53, a float that is whole, not a number, a dict
+> {"id": 24, "op": "call", "fn": "t:echo", "args": [{"t": "int", "v": "9007199254740993"}]}
+< {"id": 24, "ok": {"t": "int", "v": "9007199254740993"}}
+> {"id": 25, "op": "call", "fn": "t:echo", "args": [[9007199254740991, -9007199254740992]]}
+< {"id": 25, "ok": [9007199254740991, {"t": "int", "v": "-9007199254740992"}]}
+> {"id": 26, "op": "call", "fn": "t:echo", "args": [[{"t": "f", "v": 3.0}, {"t": "f", "v": 3}, 3.0, 0.5, 3]]}
+< {"id": 26, "ok": [{"t": "f", "v": 3.0}, {"t": "f", "v": 3.0}, {"t": "f", "v": 3.0}, 0.5, 3]}
+> {"id": 27, "op": "call", "fn": "t:echo", "args": [{"t": "nan"}]}
+< {"id": 27, "ok": {"t": "nan"}}
+> {"id": 28, "op": "call", "fn": "t:echo", "args": [{"t": "dict", "kv": [["b", 1], ["a", {"t": "dict", "kv": []}]]}]}
+< {"id": 28, "ok": {"t": "dict", "kv": [["b", 1], ["a", {"t": "dict", "kv": []}]]}}
+# an object with no tag is read as a dict; R's `na` as null; an unknown tag is refused
+> {"id": 29, "op": "call", "fn": "t:echo", "args": [{"b": [1, {"c": null}]}]}
+< {"id": 29, "ok": {"t": "dict", "kv": [["b", [1, {"t": "dict", "kv": [["c", null]]}]]]}}
+> {"id": 30, "op": "call", "fn": "t:echo", "args": [[{"t": "na"}, null, true, "é \"q\" \\ \n 日本"]]}
+< {"id": 30, "ok": [null, null, true, "é \"q\" \\ \n 日本"]}
+> {"id": 31, "op": "call", "fn": "t:echo", "args": [{"t": "frame", "cols": []}]}
+< {"id": 31, "condition": {"kind": "ValueError", "message": "*"}}

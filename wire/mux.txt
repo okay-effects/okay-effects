@@ -1,0 +1,16 @@
+# THE WIRE, MUX: answers come as their calls finish, matched by id — a call that waits does not hold the others
+# (wire/README.md). Format as in calls.txt.
+#
+# ---- a call that waits is not answered; the next one is
+< {"shim": 9, "python": "*", "speaks": {"format": ["json", "cbor"], "compress": ["deflate"], "mux": true}}
+> {"id": 1, "op": "call", "fn": "t:wait", "args": ["g"]}
+> {"id": 2, "op": "call", "fn": "t:add", "args": [2, 3]}
+< {"id": 2, "ok": 5}
+> {"id": 3, "op": "call", "fn": "t:wait", "args": ["g"]}
+# ---- the call that opens the gate: those it woke are answered first, in the order they came, then itself
+> {"id": 4, "op": "call", "fn": "t:open", "args": ["g"]}
+< {"id": 1, "ok": "g"}
+< {"id": 3, "ok": "g"}
+< {"id": 4, "ok": 2}
+> {"id": 5, "op": "call", "fn": "t:open", "args": ["g"]}
+< {"id": 5, "ok": 0}

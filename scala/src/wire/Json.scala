@@ -9,6 +9,8 @@ enum Json:
   case Str(value: String)
   case Arr(values: List[Json])
   case Obj(fields: List[(String, Json)])
+  /** not JSON: something the far side keeps, known here by a number. On the wire it is the escape `ref`. */
+  case Ref(id: Long, kind: String)
 
   /** a field of an object; `Null` when there is none */
   def apply(name: String): Json = this match
@@ -23,6 +25,7 @@ enum Json:
     case Str(value) => Json.quote(value)
     case Arr(values) => values.mkString("[", ",", "]")
     case Obj(fields) => fields.map((name, value) => Json.quote(name) + ":" + value).mkString("{", ",", "}")
+    case ref: Ref => Escapes.enc(ref).toString
 
 object Json:
   def obj(fields: (String, Json)*): Json = Obj(fields.toList)
@@ -116,4 +119,4 @@ object Json:
       while at < text.length && "+-.eE0123456789".contains(text(at)) do at += 1
       val digits = text.substring(from, at)
       if digits.isEmpty then fail("a value")
-      if digits.exists(".eE".contains(_)) then Dec(digits.toDouble) else Int(digits.toLong)
+      digits.toLongOption.fold(Dec(digits.toDouble))(Int(_))

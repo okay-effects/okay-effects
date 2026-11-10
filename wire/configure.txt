@@ -1,0 +1,15 @@
+# THE WIRE, CONFIGURE: the host chooses a format and a compression of those the hello announced; the answer comes
+# as the request went, and both sides change after it (wire/README.md). Format as in calls.txt. Only what stays
+# JSON lines is here: `json` with `none`. After any other choice the same messages go as frames — README, "Frames".
+#
+< {"shim": 9, "python": "*", "speaks": {"format": ["json", "cbor"], "compress": ["deflate"], "mux": true}}
+> {"op": "configure", "format": "json", "compress": "none"}
+< {"id": null, "ok": {"format": "json", "compress": "none"}}
+> {"id": 1, "op": "call", "fn": "t:add", "args": [2, 3]}
+< {"id": 1, "ok": 5}
+> {"op": "configure", "format": "xml", "compress": "none"}
+< {"id": null, "condition": {"kind": "ValueError", "message": "*"}}
+> {"op": "configure", "format": "cbor", "compress": "gzip"}
+< {"id": null, "condition": {"kind": "ValueError", "message": "*"}}
+> {"id": 2, "op": "call", "fn": "t:add", "args": [2, 3]}
+< {"id": 2, "ok": 5}

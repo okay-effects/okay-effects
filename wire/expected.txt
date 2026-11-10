@@ -1,3 +1,15 @@
 pairs [10,20]
 total [5]
 count [10000]
+call 5
+held t.Counter 15 15
+released LookupError
+value list 6
+condition ValueError: no
+escapes [{"t":"int","v":"9007199254740993"},{"t":"nan"},{"t":"f","v":3.0},0.5,{"t":"dict","kv":[["a",1]]}]
+stream [1,2,3,4,5]
+cancel [1,2,3] 5
+duplex [3,1,2]
+mux [1,"g"]
+cbor+deflate 5 [10,20] [1,2,3]
+auth 5
