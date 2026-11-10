@@ -5,14 +5,14 @@ use std::cell::{OnceCell, RefCell};
 use std::mem::swap;
 use std::rc::Rc;
 
-use crate::{Comp, Handler, Has, K, Program, Reply, There, defer, eff, perform, pure};
+use crate::{Comp, Handler, Has, K, Prog, Reply, There, defer, eff, perform, pure};
 
 pub enum Emit<T> {
     Send(T, Reply<()>),
 }
 
 impl<T: Clone + 'static> Emit<T> {
-    pub fn send<R: Has<Self, I>, I>(value: T) -> impl Program<(), R> {
+    pub fn send<R: Has<Self, I>, I>(value: T) -> impl Prog<(), R> {
         perform(|r| Emit::Send(value, r))
     }
 
@@ -28,7 +28,7 @@ impl<T: Clone + 'static> Emit<T> {
     }
 
     /// The values sent, with the program's own.
-    pub fn collect<R: Has<Self, I>, I, A: 'static>(p: impl Program<A, R>) -> impl Program<(Vec<T>, A), R::Rest> {
+    pub fn collect<R: Has<Self, I>, I, A: 'static>(p: impl Prog<A, R>) -> impl Prog<(Vec<T>, A), R::Rest> {
         let answer = |sent: &mut Vec<T>, op| match op {
             Emit::Send(value, r) => {
                 sent.push(value);
@@ -39,10 +39,10 @@ impl<T: Clone + 'static> Emit<T> {
     }
 
     /// `f` run for each value, as it is sent.
-    pub fn each<R: Has<Self, I>, I, A: 'static, P: Program<(), R::Rest>>(
+    pub fn each<R: Has<Self, I>, I, A: 'static, P: Prog<(), R::Rest>>(
         f: impl Fn(T) -> P + 'static,
-        p: impl Program<A, R>,
-    ) -> impl Program<A, R::Rest> {
+        p: impl Prog<A, R>,
+    ) -> impl Prog<A, R::Rest> {
         let on = move |op, k: K<A, R::Rest>| match op {
             Emit::Send(value, r) => f(value).then(move || k.resume(r, ())),
         };
@@ -52,8 +52,8 @@ impl<T: Clone + 'static> Emit<T> {
     /// A stream of the values, each through `f`.
     pub fn map<R: Has<Self, I>, I: 'static, U: Clone + 'static, A: 'static>(
         f: impl Fn(T) -> U + 'static,
-        p: impl Program<A, R>,
-    ) -> impl Program<A, (Emit<U>, R::Rest)> {
+        p: impl Prog<A, R>,
+    ) -> impl Prog<A, (Emit<U>, R::Rest)> {
         let on = move |op, k: K<A, (Emit<U>, R::Rest)>| match op {
             Emit::Send(value, r) => Emit::send(f(value)).then(move || k.resume(r, ())),
         };
@@ -63,8 +63,8 @@ impl<T: Clone + 'static> Emit<T> {
     /// A stream of the values that `keep`: the others are not sent on.
     pub fn filter<R: Has<Self, I>, I: 'static, A: 'static>(
         keep: impl Fn(&T) -> bool + 'static,
-        p: impl Program<A, R>,
-    ) -> impl Program<A, R> {
+        p: impl Prog<A, R>,
+    ) -> impl Prog<A, R> {
         let on = move |op, k: K<A, R>| match op {
             Emit::Send(value, r) if keep(&value) => Self::send(value).then(move || k.resume(r, ())).boxed(),
             Emit::Send(_, r) => k.resume(r, ()).boxed(),
@@ -73,7 +73,7 @@ impl<T: Clone + 'static> Emit<T> {
     }
 
     /// A stream of the first `n` values; the producer is not resumed after them.
-    pub fn take<R: Has<Self, I>, I: 'static, A: 'static>(n: usize, p: impl Program<A, R>) -> impl Program<(), R> {
+    pub fn take<R: Has<Self, I>, I: 'static, A: 'static>(n: usize, p: impl Prog<A, R>) -> impl Prog<(), R> {
         // what is sent on depends on how many are still wanted: the handler answers with a function of that
         type Left<R> = Rc<dyn Fn(usize) -> Comp<(), R>>;
         let on = |op: Self, k: K<Left<R>, R>| match op {
@@ -94,7 +94,7 @@ impl<T: Clone + 'static> Emit<T> {
     }
 
     /// The values, pulled as they are needed: the producer runs no further than was asked.
-    pub fn pull<A: 'static>(p: impl Program<A, eff![Emit<T>]>) -> Pull<T> {
+    pub fn pull<A: 'static>(p: impl Prog<A, eff![Emit<T>]>) -> Pull<T> {
         let on = |op, k| match op {
             Emit::Send(value, r) => pure(Sent(Some((value, r, k)))),
         };
@@ -103,16 +103,16 @@ impl<T: Clone + 'static> Emit<T> {
 
     /// Two streams, value by value in pairs, as long as both last.
     pub fn zip<U: Clone + 'static, A: 'static, B: 'static, R: Has<Emit<(T, U)>, I>, I: 'static>(
-        a: impl Program<A, eff![Emit<T>]>,
-        b: impl Program<B, eff![Emit<U>]>,
+        a: impl Prog<A, eff![Emit<T>]>,
+        b: impl Prog<B, eff![Emit<U>]>,
     ) -> Comp<(), R> {
         Emit::send_all(Emit::pull(a).zip(Emit::pull(b)))
     }
 
     /// Two streams in turn, a value of each; then what is left of the longer.
     pub fn merge<A: 'static, B: 'static, R: Has<Self, I>, I: 'static>(
-        a: impl Program<A, eff![Emit<T>]>,
-        b: impl Program<B, eff![Emit<T>]>,
+        a: impl Prog<A, eff![Emit<T>]>,
+        b: impl Prog<B, eff![Emit<T>]>,
     ) -> Comp<(), R> {
         let (mut first, mut second) = (Emit::pull(a), Emit::pull(b));
         Emit::send_all(std::iter::from_fn(move || {

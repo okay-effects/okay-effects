@@ -13,7 +13,7 @@ use crate::effects::{Emit, Pull, Throws};
 use crate::json::{Json, Ref};
 use crate::wire::escapes::{dec, enc, items};
 use crate::wire::{Condition, Foreign, Link, SHIM, auth, call};
-use crate::{Comp, Handler, Has, Includes, Program, Reply, eff, perform, pure};
+use crate::{Comp, Handler, Has, Includes, Prog, Reply, eff, perform, pure};
 
 pub enum Far {
     /// a request sent, not waited for: the number its answer will carry
@@ -51,7 +51,7 @@ fn raised<R: Has<Throws<Condition>, I>, I, A: 'static>(result: Result<A, Conditi
 }
 
 /// the answer to a request, when it has come
-fn ask(op: &'static str, fields: Vec<(&'static str, Json)>) -> impl Program<Json, Failing> {
+fn ask(op: &'static str, fields: Vec<(&'static str, Json)>) -> impl Prog<Json, Failing> {
     perform(|r| Far::Send(op, fields, r)).flat_map(|id| perform(move |r| Far::Receive(id, r))).flat_map(raised)
 }
 
@@ -61,7 +61,7 @@ fn crossing(args: &[Json]) -> Result<Json, Condition> {
 }
 
 /// a call, by a function's name or the address of something held: its answer, as a value
-fn called(address: Json, args: Vec<Json>, held: bool) -> impl Program<Json, Failing> {
+fn called(address: Json, args: Vec<Json>, held: bool) -> impl Prog<Json, Failing> {
     let asked = move |args| {
         let held = held.then_some(("held", Json::Bool(true)));
         ask("call", [("fn", address), ("args", args)].into_iter().chain(held).collect())
@@ -75,25 +75,25 @@ fn member(at: &Ref, what: &str, name: &str) -> Json {
 
 impl Far {
     /// The far function's answer.
-    pub fn call<R: Includes<Failing, Is>, Is>(name: &str, args: Vec<Json>) -> impl Program<Json, R> + use<R, Is> {
+    pub fn call<R: Includes<Failing, Is>, Is>(name: &str, args: Vec<Json>) -> impl Prog<Json, R> + use<R, Is> {
         Far::start::<Failing, _>(name, args).flat_map(Far::result).embed()
     }
 
     /// A call begun and not waited for: on a far side that speaks `mux`, others may be answered before it.
-    pub fn start<R: Includes<Failing, Is>, Is>(name: &str, args: Vec<Json>) -> impl Program<i64, R> + use<R, Is> {
+    pub fn start<R: Includes<Failing, Is>, Is>(name: &str, args: Vec<Json>) -> impl Prog<i64, R> + use<R, Is> {
         let name = Json::str(name);
         let sent = move |args| perform(|r| Far::Send("call", vec![("fn", name), ("args", args)], r));
         raised::<Failing, _, _>(crossing(&args)).flat_map(sent).embed()
     }
 
     /// The answer of a call begun.
-    pub fn result<R: Includes<Failing, Is>, Is>(id: i64) -> impl Program<Json, R> {
+    pub fn result<R: Includes<Failing, Is>, Is>(id: i64) -> impl Prog<Json, R> {
         let answer = perform::<_, _, Failing, _>(move |r| Far::Receive(id, r)).flat_map(raised);
         answer.flat_map(|ok| raised(dec(&ok))).embed()
     }
 
     /// The far function's answer kept on the far side: a ref to it.
-    pub fn hold<R: Includes<Failing, Is>, Is>(name: &str, args: Vec<Json>) -> impl Program<Ref, R> + use<R, Is> {
+    pub fn hold<R: Includes<Failing, Is>, Is>(name: &str, args: Vec<Json>) -> impl Prog<Ref, R> + use<R, Is> {
         let kept = |answer| match answer {
             Json::Ref(kept) => pure(kept).boxed(),
             other => Throws::raise(Condition::new("WireError", format!("a ref was expected: {other}"))).boxed(),
@@ -106,17 +106,17 @@ impl Far {
         at: &Ref,
         name: &str,
         args: Vec<Json>,
-    ) -> impl Program<Json, R> + use<R, Is> {
+    ) -> impl Prog<Json, R> + use<R, Is> {
         called(member(at, "method", name), args, false).embed()
     }
 
     /// An attribute of an object held.
-    pub fn attr<R: Includes<Failing, Is>, Is>(at: &Ref, name: &str) -> impl Program<Json, R> + use<R, Is> {
+    pub fn attr<R: Includes<Failing, Is>, Is>(at: &Ref, name: &str) -> impl Prog<Json, R> + use<R, Is> {
         called(member(at, "attr", name), Vec::new(), false).embed()
     }
 
     /// What the ref names is dropped on the far side.
-    pub fn release<R: Includes<Failing, Is>, Is>(at: &Ref) -> impl Program<(), R> + use<R, Is> {
+    pub fn release<R: Includes<Failing, Is>, Is>(at: &Ref) -> impl Prog<(), R> + use<R, Is> {
         ask("release", vec![("ref", Json::Int(at.id))]).map(|_| ()).embed()
     }
 
@@ -127,7 +127,7 @@ impl Far {
         name: &str,
         args: Vec<Json>,
         callbacks: &[&str],
-    ) -> impl Program<Json, R> + use<R, Is> {
+    ) -> impl Prog<Json, R> + use<R, Is> {
         // a node of the run: the far program's value, or what it asks and the number of its rest
         fn node(run: i64, ok: Json) -> Comp<Json, Asking> {
             let Json::Str(name) = ok.get("perform") else { return raised(dec(ok.get("done"))) };
@@ -160,7 +160,7 @@ impl Far {
         args: Vec<Json>,
         credit: i64,
         input: Option<Comp<(), eff![Emit<Json>]>>,
-    ) -> impl Program<(), R> + use<R, Is> {
+    ) -> impl Prog<(), R> + use<R, Is> {
         fn rest(stream: i64) -> Comp<(), Streaming> {
             let sent = move |chunk| match chunk {
                 Some(chunk) => raised(dec(&chunk)).flat_map(Emit::send).then(move || rest(stream)).boxed(),
@@ -401,7 +401,7 @@ impl Remote {
 
     /// THE PROGRAM RUN to its value, its far operations done on this wire. When it ends, what it left open on the
     /// far side is closed: its runs forgotten, its streams cancelled. Refs live on, until released.
-    pub fn run<A: 'static>(&self, p: impl Program<A, eff![Far]>) -> A {
+    pub fn run<A: 'static>(&self, p: impl Prog<A, eff![Far]>) -> A {
         let wire = self.0.clone();
         let answer = move |_: &mut (), op| {
             let mut wire = wire.borrow_mut();

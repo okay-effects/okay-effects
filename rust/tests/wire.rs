@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use okay_effects::effects::{Emit, Throws};
 use okay_effects::json::Json;
 use okay_effects::wire::{Asking, Condition, Failing, Far, Foreign, Remote, Streaming};
-use okay_effects::{Handler, K, Program, pure};
+use okay_effects::{Handler, K, Prog, pure};
 
 /// the demonstration, which `cargo test` builds beside this test: target/<profile>/examples/demo
 fn demo() -> PathBuf {
@@ -25,11 +25,11 @@ fn far() -> Remote {
     Remote::start(&worker(), false, false, None).unwrap_or_else(|c| panic!("{}: {}", c.kind, c.message))
 }
 
-fn on<A: 'static>(far: &Remote, p: impl Program<A, Failing>) -> Result<A, Condition> {
+fn on<A: 'static>(far: &Remote, p: impl Prog<A, Failing>) -> Result<A, Condition> {
     far.run(Throws::run(p))
 }
 
-fn sent(far: &Remote, p: impl Program<(), Streaming>) -> Result<Vec<Json>, Condition> {
+fn sent(far: &Remote, p: impl Prog<(), Streaming>) -> Result<Vec<Json>, Condition> {
     on(far, Emit::collect(p).map(|(values, _)| values))
 }
 

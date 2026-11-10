@@ -6,7 +6,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use okay_effects::effects::{Choose, Reader, State, Writer};
-use okay_effects::{Comp, Program, eff, pure};
+use okay_effects::{Comp, Prog, eff, pure};
 
 fn count(n: i64) -> Comp<i64, eff![State<i64>]> {
     if n == 0 {

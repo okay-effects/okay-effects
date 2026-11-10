@@ -162,7 +162,7 @@ impl Drop for Erased {
 mod tests {
     use super::*;
     use crate::machine::run;
-    use crate::{Comp, Program, pure};
+    use crate::{Comp, Prog, pure};
 
     fn started<A: 'static>(erased: Erased) -> A {
         run(|m| erased.start(m)).ok().expect("a value").take()

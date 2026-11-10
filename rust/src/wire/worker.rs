@@ -18,7 +18,7 @@ use crate::effects::{Async, Emit, Resume, Throws};
 use crate::json::{Json, Ref};
 use crate::wire::escapes::{dec, enc, items};
 use crate::wire::{Condition, Foreign, Link, SHIM, auth};
-use crate::{Asked, Comp, Handler, Has, K, Program, Reply, Resumed, Step, eff, perform, pure};
+use crate::{Asked, Comp, Handler, Has, K, Prog, Reply, Resumed, Step, eff, perform, pure};
 
 /// THE STREAM A CALLER FEEDS into a function of the far side: the function takes a value at a time.
 pub enum Fed {
@@ -27,7 +27,7 @@ pub enum Fed {
 
 impl Fed {
     /// The caller's next value, waited for; none at the stream's end.
-    pub fn next<R: Has<Self, I>, I>() -> impl Program<Option<Json>, R> {
+    pub fn next<R: Has<Self, I>, I>() -> impl Prog<Option<Json>, R> {
         perform(Fed::Next)
     }
 }

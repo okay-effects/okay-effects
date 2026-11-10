@@ -2,14 +2,14 @@
 //! it. The same model as the Scala and the Java kernels beside this one; the same programs come to the same answers.
 //!
 //! An effect is one enum; each operation is a variant that carries a `Reply<X>`, the witness of what answers it.
-//! A handler is one closure with a `match` over the enum. A computation `impl Program<A, R>` carries the ROW `R` of
+//! A handler is one closure with a `match` over the enum. A computation `impl Prog<A, R>` carries the ROW `R` of
 //! the effects it may ask, a list of types: a handler takes its effect out of the row, and only a program with the
 //! empty row has `run`. So rustc refuses an effect left without a handler, a handler that misses an operation,
 //! and an answer of the wrong type.
 //!
 //! ```
 //! use okay_effects::effects::Choose;
-//! use okay_effects::{Handler, Has, Program, Reply, eff, perform, pure};
+//! use okay_effects::{Handler, Has, Prog, Reply, eff, perform, pure};
 //!
 //! // an effect: its operations, each with what answers it
 //! enum Account {
@@ -17,21 +17,21 @@
 //!     Balance(Reply<i64>),
 //! }
 //!
-//! fn deposit<R: Has<Account, I>, I>(amount: i64) -> impl Program<(), R> {
+//! fn deposit<R: Has<Account, I>, I>(amount: i64) -> impl Prog<(), R> {
 //!     perform(|r| Account::Deposit(amount, r))
 //! }
 //!
-//! fn balance<R: Has<Account, I>, I>() -> impl Program<i64, R> {
+//! fn balance<R: Has<Account, I>, I>() -> impl Prog<i64, R> {
 //!     perform(Account::Balance)
 //! }
 //!
 //! // a program of two effects
-//! fn program() -> impl Program<i64, eff![Account, Choose]> {
+//! fn program() -> impl Prog<i64, eff![Account, Choose]> {
 //!     Choose::among(vec![1, 2]).flat_map(|x| deposit(x * 10)).then(|| balance())
 //! }
 //!
 //! // a handler: every operation answered in place, from a balance it keeps
-//! fn bank<A: 'static>(start: i64, p: impl Program<A, eff![Account, Choose]>) -> impl Program<A, eff![Choose]> {
+//! fn bank<A: 'static>(start: i64, p: impl Prog<A, eff![Account, Choose]>) -> impl Prog<A, eff![Choose]> {
 //!     let answer = |balance: &mut i64, op| match op {
 //!         Account::Deposit(amount, r) => {
 //!             *balance += amount;
@@ -50,7 +50,7 @@
 //!
 //! A program is composed STATICALLY: `flat_map`, `map`, `then`, `perform`, `handle` each return a struct that holds
 //! its parts — nothing is allocated, and rustc compiles a chain of them into straight-line code. So the type of a
-//! program is its shape, and it is not written: a function returns `impl Program<A, R>`.
+//! program is its shape, and it is not written: a function returns `impl Prog<A, R>`.
 //!
 //! The type is forgotten only where you say so, with `.boxed()`, which gives a `Comp<A, R>` — a computation of any
 //! shape, kept in place when it is small and in a box when it is not, and started by the machine's loop (so a
@@ -63,7 +63,7 @@
 //!
 //! ```
 //! use okay_effects::effects::{State, Throws};
-//! use okay_effects::{Comp, Program, eff, pure};
+//! use okay_effects::{Comp, Prog, eff, pure};
 //!
 //! // counts down to nothing, or fails: a loop, and two shapes of its end
 //! fn down(n: i64) -> Comp<i64, eff![State<i64>, Throws<String>]> {
@@ -81,7 +81,7 @@
 //! assert_eq!(pure::<_, ()>(1).map(|x| x + 1).run(), 2);
 //! ```
 //!
-//! A function that is given a reference and returns `impl Program<A, R>` says so with `+ use<R, I>` (its type
+//! A function that is given a reference and returns `impl Prog<A, R>` says so with `+ use<R, I>` (its type
 //! parameters): without it rustc takes the program to hold the reference.
 //!
 //! A closure given to `flat_map`, `map`, `then` or `defer` is `FnOnce + Clone + 'static`. It is called once — it
@@ -100,7 +100,7 @@
 //!
 //! ```compile_fail,E0277
 //! use okay_effects::effects::{Choose, State};
-//! use okay_effects::{Comp, Program, eff};
+//! use okay_effects::{Comp, Prog, eff};
 //!
 //! let p: Comp<i64, eff![State<i64>, Choose]> = State::get().boxed();
 //! State::run(0, p).run(); // `Choose` is not handled
@@ -110,7 +110,7 @@
 //!
 //! ```compile_fail,E0277
 //! use okay_effects::effects::{Choose, State};
-//! use okay_effects::{Comp, Program, eff};
+//! use okay_effects::{Comp, Prog, eff};
 //!
 //! let p: Comp<i64, eff![Choose]> = State::get().boxed();
 //! ```
@@ -118,12 +118,12 @@
 //! A handler that misses an operation: the `match` is not exhaustive.
 //!
 //! ```compile_fail,E0004
-//! # use okay_effects::{Handler, Program, Reply, eff, pure};
+//! # use okay_effects::{Handler, Prog, Reply, eff, pure};
 //! # enum Account {
 //! #     Deposit(i64, Reply<()>),
 //! #     Balance(Reply<i64>),
 //! # }
-//! fn bank(p: impl Program<i64, eff![Account]>) -> impl Program<i64, eff![]> {
+//! fn bank(p: impl Prog<i64, eff![Account]>) -> impl Prog<i64, eff![]> {
 //!     let answer = |balance: &mut i64, op| match op {
 //!         Account::Balance(r) => r.give(*balance),
 //!     };
@@ -134,12 +134,12 @@
 //! An answer of the wrong type: a `Reply<i64>` gives only an `i64`.
 //!
 //! ```compile_fail,E0308
-//! # use okay_effects::{Handler, Program, Reply, eff, pure};
+//! # use okay_effects::{Handler, Prog, Reply, eff, pure};
 //! # enum Account {
 //! #     Deposit(i64, Reply<()>),
 //! #     Balance(Reply<i64>),
 //! # }
-//! fn bank(p: impl Program<i64, eff![Account]>) -> impl Program<i64, eff![]> {
+//! fn bank(p: impl Prog<i64, eff![Account]>) -> impl Prog<i64, eff![]> {
 //!     let answer = |balance: &mut i64, op| match op {
 //!         Account::Deposit(amount, r) => {
 //!             *balance += amount;
@@ -215,9 +215,9 @@ macro_rules! eff {
 /// A computation of an `A` that may ask the operations of the row `R`. Only data: nothing runs until `step`.
 /// It is run once: what is asked for many times is built by a function. Every computation is one of the kernel's
 /// structs — `Pure`, `Ask`, `Bind`..., and `Comp`, the one whose type is forgotten; a function says
-/// `impl Program<A, R>` and need not name them.
-pub trait Program<A: 'static, R: 'static>: Start<Row = R, Out = A> {
-    fn flat_map<B: 'static, D: Program<B, R>, F: FnOnce(A) -> D + Clone + 'static>(self, f: F) -> Bind<Self, F> {
+/// `impl Prog<A, R>` and need not name them.
+pub trait Prog<A: 'static, R: 'static>: Start<Row = R, Out = A> {
+    fn flat_map<B: 'static, D: Prog<B, R>, F: FnOnce(A) -> D + Clone + 'static>(self, f: F) -> Bind<Self, F> {
         Bind { c: self, f }
     }
 
@@ -226,7 +226,7 @@ pub trait Program<A: 'static, R: 'static>: Start<Row = R, Out = A> {
     }
 
     /// The computation after this one, whose value is not needed.
-    fn then<B: 'static, D: Program<B, R>, F: FnOnce() -> D + Clone + 'static>(self, next: F) -> Then<Self, F> {
+    fn then<B: 'static, D: Prog<B, R>, F: FnOnce() -> D + Clone + 'static>(self, next: F) -> Then<Self, F> {
         Then { c: self, f: next }
     }
 
@@ -265,7 +265,7 @@ pub trait Program<A: 'static, R: 'static>: Start<Row = R, Out = A> {
     }
 }
 
-impl<C: Start> Program<C::Out, C::Row> for C {}
+impl<C: Start> Prog<C::Out, C::Row> for C {}
 
 /// A computation whose type is forgotten: what a function that calls itself returns, what branches of different
 /// shapes come to, what is kept as a value. Made by `.boxed()`.
@@ -397,7 +397,7 @@ impl<A, D: Start, F: FnOnce() -> D + Clone + 'static, K: Kont<D::Out>> Kont<A> f
 }
 
 /// A computation built when it is reached: a call in tail position takes no stack.
-pub fn defer<A: 'static, R: 'static, D: Program<A, R>>(p: impl FnOnce() -> D + Clone + 'static) -> Comp<A, R> {
+pub fn defer<A: 'static, R: 'static, D: Prog<A, R>>(p: impl FnOnce() -> D + Clone + 'static) -> Comp<A, R> {
     pure(()).then(p).boxed()
 }
 
@@ -570,7 +570,7 @@ pub struct Handler<E, A, B, R> {
 
 impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
     /// THE GENERAL HANDLER. A clause is given the rest of the program, `k`, as a value.
-    pub fn new<P: Program<B, R>, Q: Program<B, R>>(
+    pub fn new<P: Prog<B, R>, Q: Prog<B, R>>(
         ret: impl Fn(A) -> P + 'static,
         on: impl Fn(E, K<B, R>) -> Q + 'static,
     ) -> Self {
@@ -583,7 +583,7 @@ impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
     /// THE HANDLER IN PLACE: every operation answered at once, from a state the handler keeps — nothing is
     /// captured, the program goes on. The state belongs to the path: a continuation resumed twice starts twice
     /// from the state it was taken with.
-    pub fn in_place<S: Clone + 'static, P: Program<B, R>>(
+    pub fn in_place<S: Clone + 'static, P: Prog<B, R>>(
         s0: S,
         ret: impl Fn(S, A) -> P + 'static,
         answer: impl Fn(&mut S, E) -> Answer + 'static,
@@ -601,12 +601,12 @@ impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
     }
 
     /// The operations of `E` answered, every other one passing outside; `E` leaves the row.
-    pub fn handle<In: Has<E, I, Rest = R>, I, C: Program<A, In>>(self, p: C) -> Handled<C, B, R> {
+    pub fn handle<In: Has<E, I, Rest = R>, I, C: Prog<A, In>>(self, p: C) -> Handled<C, B, R> {
         Handled { mark: Rc::new(self.mark), state: self.state, body: p, of: PhantomData }
     }
 
     /// `handle`, the effect kept in the row: a clause may ask the operation again — interception, audit.
-    pub fn intercept<I, C: Program<A, R>>(self, p: C) -> Handled<C, B, R>
+    pub fn intercept<I, C: Prog<A, R>>(self, p: C) -> Handled<C, B, R>
     where
         R: Has<E, I>,
     {

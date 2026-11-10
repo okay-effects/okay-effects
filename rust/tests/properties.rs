@@ -30,7 +30,7 @@ fn a_row_handlers_take_their_effects_one_by_one_a_program_runs_when_none_is_left
 
 #[test]
 fn the_order_of_handlers_is_the_meaning_state_kept_or_lost_at_a_failure() {
-    fn p() -> impl Program<(), eff![State<i64>, Throws<String>]> {
+    fn p() -> impl Prog<(), eff![State<i64>, Throws<String>]> {
         State::put(5).then(|| Throws::raise("no".to_string()))
     }
     assert_eq!(State::run(0, Throws::run(p())).run(), (5, Err("no".to_string())));
@@ -70,7 +70,7 @@ fn a_continuation_taken_many_times_every_path_of_a_choice() {
 
 #[test]
 fn many_times_with_state_each_path_its_own_state_or_one_state_through_all() {
-    fn p() -> impl Program<i64, eff![State<i64>, Choose]> {
+    fn p() -> impl Prog<i64, eff![State<i64>, Choose]> {
         Choose::among(vec![1, 2])
             .flat_map(|x| State::get().flat_map(move |s: i64| State::put(s + x).map(move |_| s + x)))
     }
@@ -91,7 +91,7 @@ fn an_endless_stream_pulled() {
 #[test]
 fn asynchrony_the_handler_returns_the_answer_resumes_the_program_later() {
     type Waiting = Rc<RefCell<VecDeque<Box<dyn FnOnce()>>>>;
-    fn later(n: i32, waiting: &Waiting) -> impl Program<i32, eff![Async]> + use<> {
+    fn later(n: i32, waiting: &Waiting) -> impl Prog<i32, eff![Async]> + use<> {
         let waiting = waiting.clone();
         Async::wait(move |resume: Resume<i32>| waiting.borrow_mut().push_back(Box::new(move || resume(n))))
     }
@@ -127,15 +127,15 @@ enum Account {
     Deposit(i64, Reply<i64>),
 }
 
-fn deposit<R: Has<Account, I>, I>(amount: i64) -> impl Program<i64, R> {
+fn deposit<R: Has<Account, I>, I>(amount: i64) -> impl Prog<i64, R> {
     perform(|r| Account::Deposit(amount, r))
 }
 
 #[test]
 fn delegation_an_effect_answered_by_the_operations_of_another() {
     fn on_state<R: Has<Account, I>, I: 'static, A: 'static>(
-        p: impl Program<A, R>,
-    ) -> impl Program<A, (State<i64>, R::Rest)> {
+        p: impl Prog<A, R>,
+    ) -> impl Prog<A, (State<i64>, R::Rest)> {
         let on = |op, k: K<A, (State<i64>, R::Rest)>| match op {
             Account::Deposit(amount, r) => State::get()
                 .flat_map(move |s: i64| State::put(s + amount).map(move |_| s + amount))
@@ -158,7 +158,7 @@ fn reader_a_value_of_the_surroundings_and_changed_for_a_part_of_the_program() {
 fn a_failure_recovered_the_first_of_the_choices_fresh_numbers_a_clock_that_a_test_sets() {
     let failing = Throws::raise::<eff![Throws<String>], _, usize>("no".to_string());
     assert_eq!(Throws::recover(|e: String| pure(e.len()), failing).run(), 2);
-    fn odd() -> impl Program<i32, eff![Choose]> {
+    fn odd() -> impl Prog<i32, eff![Choose]> {
         Choose::among(vec![2, 4, 5, 7])
             .flat_map(|x| if x % 2 == 0 { Choose::none().boxed() } else { pure(x).boxed() })
     }
@@ -171,7 +171,7 @@ fn a_failure_recovered_the_first_of_the_choices_fresh_numbers_a_clock_that_a_tes
 
 #[test]
 fn streams_collected_looped_over_mapped_filtered_cut_short_zipped_merged() {
-    fn three<R: Has<Emit<i64>, I>, I: 'static>() -> impl Program<(), R> {
+    fn three<R: Has<Emit<i64>, I>, I: 'static>() -> impl Prog<(), R> {
         Emit::send_all(vec![1, 2, 3])
     }
     assert_eq!(Emit::collect(three::<eff![Emit<i64>], _>()).run(), (vec![1, 2, 3], ()));
@@ -185,7 +185,7 @@ fn streams_collected_looped_over_mapped_filtered_cut_short_zipped_merged() {
 }
 
 /// A program started, and time moved on until it has its value.
-fn wait_for<A: 'static>(timers: &Timers, p: impl Program<A, eff![Async]>) -> A {
+fn wait_for<A: 'static>(timers: &Timers, p: impl Prog<A, eff![Async]>) -> A {
     let result = Rc::new(Cell::new(None));
     let out = result.clone();
     Async::start(p, move |a| out.set(Some(a)));

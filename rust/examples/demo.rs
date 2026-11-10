@@ -14,7 +14,7 @@ use okay_effects::json::{Json, Ref};
 use okay_effects::wire::escapes::enc;
 use okay_effects::wire::{Asking, Condition, Failing, Far, Fed, Foreign, Module, Remote, Row, Streaming, Thing};
 use okay_effects::wire::{call, serve};
-use okay_effects::{Comp, Handler, Has, K, Program, defer, pure};
+use okay_effects::{Comp, Handler, Has, K, Prog, defer, pure};
 
 // -- THE MODULE the worker serves; what it remembers is the worker's, for as long as it lives
 
@@ -94,13 +94,13 @@ impl Thing for Counter {
 }
 
 /// a function of the module, from its cases; any other arguments are refused by name
-fn function<P: Program<Json, Row>>(
+fn function<P: Prog<Json, Row>>(
     module: &mut Module,
     name: &'static str,
     cases: impl Fn(&[Json]) -> Option<P> + 'static,
 ) {
     let refused = move || Throws::raise(Condition::new("TypeError", format!("{name}: not its arguments"))).boxed();
-    module.functions.insert(name, Box::new(move |args| cases(args).map_or_else(refused, Program::boxed)));
+    module.functions.insert(name, Box::new(move |args| cases(args).map_or_else(refused, Prog::boxed)));
 }
 
 fn module() -> Module {
@@ -180,7 +180,7 @@ fn module() -> Module {
 // -- THE HOST
 
 /// This side's answers: every choice taken, a price looked up, a tick counted.
-fn answered<R: Has<Foreign, I>, I>(p: impl Program<Json, R>) -> impl Program<Vec<Json>, R::Rest> {
+fn answered<R: Has<Foreign, I>, I>(p: impl Prog<Json, R>) -> impl Prog<Vec<Json>, R::Rest> {
     let on = |op, k: K<Vec<Json>, R::Rest>| match op {
         Foreign::Call(name, args, r) => match (name.as_str(), args.as_slice()) {
             ("choose", [Json::Arr(values)]) => values.iter().fold(pure(Vec::new()).boxed(), |found, x| {
@@ -196,18 +196,18 @@ fn answered<R: Has<Foreign, I>, I>(p: impl Program<Json, R>) -> impl Program<Vec
 }
 
 /// the program's value on a far side, or the far side's failure
-fn on<A: Display + 'static>(far: &Remote, p: impl Program<A, Failing>) -> String {
+fn on<A: Display + 'static>(far: &Remote, p: impl Prog<A, Failing>) -> String {
     match far.run(Throws::run(p)) {
         Ok(value) => value.to_string(),
         Err(Condition { kind, message }) => format!("{kind}: {message}"),
     }
 }
 
-fn all(p: impl Program<Json, Asking>) -> impl Program<Json, Failing> {
+fn all(p: impl Prog<Json, Asking>) -> impl Prog<Json, Failing> {
     answered(p).map(Json::Arr)
 }
 
-fn sent(p: impl Program<(), Streaming>) -> impl Program<Json, Failing> {
+fn sent(p: impl Prog<(), Streaming>) -> impl Prog<Json, Failing> {
     Emit::collect(p).map(|(values, _)| Json::Arr(values))
 }
 
