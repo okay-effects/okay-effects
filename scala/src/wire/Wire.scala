@@ -14,7 +14,7 @@ enum Foreign[X]:
 
 export Foreign.Call
 
-def call[R[_]](name: String, args: Json*)(using In[Foreign, R]): Json ! R = perform[Foreign](Call(name, args.toList))
+def call(name: String, args: Json*): Word[Foreign, Json] = word(Call(name, args.toList))
 
 /** A failure that crosses, by name: raised on one side, handled on the other (`Throws % Condition`). */
 final case class Condition(kind: String, message: String) extends RuntimeException(s"$kind: $message")

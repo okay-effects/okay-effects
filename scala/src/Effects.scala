@@ -1,9 +1,13 @@
 package okay.effects.scala
 
+import scala.language.implicitConversions
+
 /** A computation of an `A` that may ask the operations of the row `R`. Only data: nothing runs until `step`. */
 sealed abstract class Comp[R[_], +A]:
   final def flatMap[B](f: A => B ! R): B ! R = new Comp.Bind(this, f)
   final def map[B](f: A => B): B ! R = new Comp.Bind(this, a => new Comp.Done(f(a)))
+  /** this program in a row that has its effects, and others: `p.into[S]` */
+  final def into[S[_]](using sub: Sub[R, S]): A ! S = Comp.embedded(this, sub)
 
 object Comp:
   /** a value */
@@ -16,6 +20,19 @@ object Comp:
   private[scala] final class Handle[R[_], +A](val mark: Machine.Mark, val body: Comp[?, ?]) extends Comp[R, A]
   /** a continuation taken earlier, resumed with an answer */
   private[scala] final class Resume[R[_], +A](val k: Machine.Pieces, val x: Any) extends Comp[R, A]
+
+  /** a word is a program of any row that has its effect: its place is found where the row is known */
+  implicit def placed[E[_], X, R[_]](w: Word[E, X])(using at: In[E, R]): X ! R = w.into
+
+  /** `p`, its places those of `S`. With the same numbers it is the same program; an operation alone, or a value,
+   * is made anew; any other is run under a level that renames what passes it (Machine.scala). */
+  private def embedded[R[_], S[_], A](p: A ! R, sub: Sub[R, S]): A ! S =
+    val places = numbersOf(sub)
+    if keepsPlaces(places) then p.asInstanceOf[A ! S]
+    else p match
+      case ask: Ask[R, e, x] => new Ask[S, e, x](placeAt(renamed(places, numberOf(ask.at))), ask.op)
+      case done: Done[R, A] => new Done(done.value)
+      case _ => new Handle(Machine.Mark.renaming(places), p)
 
 /** `A ! R`: a program of an `A` over the row `R` — `Int ! State % Int + Choose` */
 infix type ![+A, R[_]] = Comp[R, A]
@@ -77,7 +94,36 @@ def pure[A, R[_]](a: A): A ! R = new Comp.Done(a)
 /** the value `()` */
 def unit[R[_]]: Unit ! R = new Comp.Done(())
 
-/** an operation of `E`: `perform[State % Int](State.Get())` — the effect said, the answer's type from the
+/** AN OPERATION, NOT YET PLACED: a word of an effect — `State.get`, `Choose.among(1, 2)`. It says no row: the row
+ * is the program's, known where the word is used, and there the compiler finds the effect's place in it. So a
+ * word is bound (`flatMap`, `map`: a `for`) into a program of the row expected, is a program where one is expected,
+ * and `into[R]` says the row. At run time it is the operation itself: nothing is made for it. */
+opaque type Word[E[_], X] = E[X]
+
+/** the word of an operation: `def deposit(n: Int) = word(Account.Deposit(n))` */
+def word[E[_], X](op: E[X]): Word[E, X] = op
+
+/** The order of a bind's clauses is the order the compiler learns in: the effect's own type from the evidence in
+ * scope (`Known`), so that `f`'s argument has its type; then `f`, and with it or with what is expected the row;
+ * then the effect's place in that row. */
+extension [E[_], X](w: Word[E, X])
+  def flatMap[R[_], B](using Known[E])(f: X => B ! R)(using at: In[E, R]): B ! R =
+    new Comp.Bind(new Comp.Ask(at, w), f)
+  def map[R[_], B](using Known[E])(f: X => B)(using at: In[E, R]): B ! R = new Comp.Ask(at, w).map(f)
+  /** this word as a program of the row `R` */
+  def into[R[_]](using at: In[E, R]): X ! R = new Comp.Ask(at, w)
+
+/** a word or a program — the two branches of an `if` that is bound: `_ <- if bad then Throws.raise(e) else unit` */
+extension [E[_], X, R[_], A](p: Word[E, X] | (A ! R))
+  def flatMap[B](f: (X | A) => B ! R)(using at: In[E, R]): B ! R = either(p, at).flatMap(f)
+  def map[B](f: (X | A) => B)(using at: In[E, R]): B ! R = either(p, at).map(f)
+
+private def either[E[_], X, R[_], A](p: Word[E, X] | (A ! R), at: In[E, R]): (X | A) ! R = p match
+  case program: Comp[?, ?] => program.asInstanceOf[A ! R]
+  // a cast: what is not a program is the word, an operation
+  case op => new Comp.Ask(at, op.asInstanceOf[E[X]])
+
+/** an operation of `E`, placed: `perform[State % Int](State.Get())` — the effect said, the answer's type from the
  * operation, the row from the evidence in scope or from what is expected. (Scala takes all of a method's type
  * arguments or none, so the rest are `Performing`'s; it is nothing at run time.) */
 def perform[E[_]]: Performing[E] = ()

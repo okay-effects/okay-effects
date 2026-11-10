@@ -4,8 +4,10 @@ import okay.effects.scala.*
 
 /*
  * THE STANDARD EFFECTS: each an enum of its operations — data; each says what answers it — its words, its
- * handlers. A word finds its row from the evidence in scope — `def tick[R[_]: Has[State % Int]]` lets `State.get`
- * and `State.put(n)` say nothing more — or from what is expected.
+ * handlers. A word is an operation not yet placed (`Word`): it says no row; the program it is used in does, by
+ * its declared type or by the evidence in scope. What is made of several operations (`State.modify`,
+ * `Emit.sendAll`) is a program, generic in its row: bound in a program of a declared row, it is told that row —
+ * `State.modify[Int, App](_ + 1)`.
  */
 
 /** STATE of type `S`, read and written. */
@@ -14,9 +16,9 @@ enum State[S, X]:
   case Put[S](s: S) extends State[S, Unit]
 
 object State:
-  def get[S, R[_]](using In[State % S, R]): S ! R = perform[State % S](Get())
-  def put[S, R[_]](s: S)(using In[State % S, R]): Unit ! R = perform[State % S](Put(s))
-  def modify[S, R[_]](f: S => S)(using In[State % S, R]): Unit ! R = get[S, R].flatMap(s => put(f(s)))
+  def get[S]: Word[State % S, S] = word(Get())
+  def put[S](s: S): Word[State % S, Unit] = word(Put(s))
+  def modify[S, R[_]](f: S => S)(using In[State % S, R]): Unit ! R = get[S].flatMap(s => put(f(s)))
 
   /** the state kept by the handler, answered in place; each path of the program has its own */
   def run[S, R[_], Rest[_], A](init: S)(p: A ! R)(using Split[State % S, R, Rest]): (S, A) ! Rest =
@@ -30,7 +32,7 @@ enum Reader[V, X]:
   case Ask[V]() extends Reader[V, V]
 
 object Reader:
-  def ask[V, R[_]](using In[Reader % V, R]): V ! R = perform[Reader % V](Ask())
+  def ask[V]: Word[Reader % V, V] = word(Ask())
 
   def run[V, R[_], Rest[_], A](value: V)(p: A ! R)(using Split[Reader % V, R, Rest]): A ! Rest =
     handle(p, Handler.tail[Reader % V, Rest, A, A](pure)([X] => (op: Reader[V, X]) => op match
@@ -39,14 +41,14 @@ object Reader:
   /** the program, its asks answered by the reader outside, through `f`: an interceptor */
   def local[V, R[_], A](f: V => V)(p: A ! R)(using In[Reader % V, R]): A ! R =
     intercept(p, Handler.general[Reader % V, R, A, A](pure)([X] => (op: Reader[V, X], k: X => A ! R) => op match
-      case Ask() => ask[V, R].flatMap(v => k(f(v)))))
+      case Ask() => ask[V].flatMap(v => k(f(v)))))
 
 /** WRITER: values told, collected in order. */
 enum Writer[W, X]:
   case Tell[W](w: W) extends Writer[W, Unit]
 
 object Writer:
-  def tell[W, R[_]](w: W)(using In[Writer % W, R]): Unit ! R = perform[Writer % W](Tell(w))
+  def tell[W](w: W): Word[Writer % W, Unit] = word(Tell(w))
 
   def run[W, R[_], Rest[_], A](p: A ! R)(using Split[Writer % W, R, Rest]): (List[W], A) ! Rest =
     handle(p, Handler.stateful[Writer % W, Rest, A, (List[W], A), List[W]](Nil)((told, a) => pure((told.reverse, a)))(
@@ -58,7 +60,7 @@ enum Throws[E, X]:
   case Raise[E](error: E) extends Throws[E, Nothing]
 
 object Throws:
-  def raise[E, R[_]](error: E)(using In[Throws % E, R]): Nothing ! R = perform[Throws % E](Raise(error))
+  def raise[E](error: E): Word[Throws % E, Nothing] = word(Raise(error))
 
   def run[E, R[_], Rest[_], A](p: A ! R)(using Split[Throws % E, R, Rest]): Either[E, A] ! Rest =
     handle(p, Handler.abort[Throws % E, Rest, A, Either[E, A]](a => pure(Right(a)))(
@@ -75,9 +77,9 @@ enum Choose[X]:
   case Among[X](xs: List[X]) extends Choose[X]
 
 object Choose:
-  def among[X, R[_]](xs: X*)(using In[Choose, R]): X ! R = perform[Choose](Among(xs.toList))
+  def among[X](xs: X*): Word[Choose, X] = word(Among(xs.toList))
   /** no value: this path ends */
-  def none[R[_]](using In[Choose, R]): Nothing ! R = perform[Choose](Among(Nil))
+  def none[X]: Word[Choose, X] = word(Among(Nil))
 
   /** every value the program comes to */
   def all[R[_], Rest[_], A](p: A ! R)(using Split[Choose, R, Rest]): List[A] ! Rest =
@@ -101,10 +103,15 @@ enum Fresh[X]:
   case Next extends Fresh[Long]
 
 object Fresh:
-  def fresh[R[_]](using In[Fresh, R]): Long ! R = perform[Fresh](Next)
+  def fresh: Word[Fresh, Long] = word(Next)
+  /** okay-scala's name of `fresh` */
+  def next: Word[Fresh, Long] = fresh
 
-  def run[R[_], Rest[_], A](p: A ! R)(using Split[Fresh, R, Rest]): A ! Rest =
-    handle(p, Handler.stateful[Fresh, Rest, A, A, Long](0L)((_, a) => pure(a))(
+  def run[R[_], Rest[_], A](p: A ! R)(using Split[Fresh, R, Rest]): A ! Rest = from(0L)(p)
+
+  /** numbers from `start` on */
+  def from[R[_], Rest[_], A](start: Long)(p: A ! R)(using Split[Fresh, R, Rest]): A ! Rest =
+    handle(p, Handler.stateful[Fresh, Rest, A, A, Long](start)((_, a) => pure(a))(
       [X] => (op: Fresh[X], next: Cell[Long]) => op match
         case Next => next.set(next.get + 1); next.get - 1))
 
@@ -113,7 +120,7 @@ enum Clock[X]:
   case Now extends Clock[Long]
 
 object Clock:
-  def now[R[_]](using In[Clock, R]): Long ! R = perform[Clock](Now)
+  def now: Word[Clock, Long] = word(Now)
 
   def system[R[_], Rest[_], A](p: A ! R)(using Split[Clock, R, Rest]): A ! Rest =
     at(() => System.currentTimeMillis())(p)

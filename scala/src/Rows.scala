@@ -13,6 +13,9 @@ package okay.effects.scala
  * compiler finds the place (`In`, `Split`); the machine finds a handler by it, and looks at no class. So one
  * effect may be in a row twice, each of its places with a handler of its own. Of the two the compiler finds the
  * LAST, the one the innermost handler takes; the other is given by name: `(using Place.init)`.
+ *
+ * A handler takes its effect out of the row, and what is left is the row as one would write it: `A + B` without
+ * `A` is `B`. A row whose effects are all in another is in it (`Sub`): `p.into[S]` is the program in that row.
  */
 
 /** the row `R` and the effect `E` after it: a name only, of no value. The row `R + E` is `[X] =>> Sum[R, E, X]` */
@@ -50,9 +53,13 @@ object Place extends LastPlace:
   /** the one effect of a row of one */
   given only[E[_]]: Place[E, E, Pure] = placeAt(0)
 
-trait LastPlace extends InitPlace:
+trait LastPlace extends FirstOfTwo:
   /** the last effect of `R + E` */
   given last[R[_], E[_]]: Place[E, R + E, R] = placeAt(0)
+
+trait FirstOfTwo extends InitPlace:
+  /** the first effect of a row of two: without it the row is the other effect, `G` — not `Pure + G` */
+  given first[E[_], G[_]]: Place[E, E + G, G] = placeAt(1)
 
 trait InitPlace:
   /** one further in than the last, `G` */
@@ -75,3 +82,56 @@ trait SplitMissing:
 /** a place as the machine has it, a number: the kernel's own view of the evidence */
 private[scala] inline def numberOf[E[_], R[_]](at: In[E, R]): Int = at
 private[scala] inline def placeAt[E[_], R[_], Rest[_]](number: Int): Place[E, R, Rest] = number
+
+/** EVERY EFFECT OF `R` IS IN `S`: where each is there, found by the compiler. What `into` asks, to use a program of
+ * `R` as a program of `S`. At run time: the places in `S` of `R`'s places 0, 1, … and, last, the place in `S` of
+ * `R`'s next one, those after it following — for a row known in part, as `Rest + E` is; -1 when there is none. */
+opaque type Sub[R[_], S[_]] = IArray[Int]
+
+/** the rows found in a row: itself; then `Pure`, and `R + E` by its parts; then an effect */
+object Sub extends SubMore:
+  given same[R[_]]: Sub[R, R] = renaming(Nil, 0)
+
+  /** `R` in `S + E`, when `R` is `Rest` with `E` and `S` is `Rest` with `G`: `E` goes to the end of the row, the
+   * effects of `Rest` to where they are in `S` */
+  def exchanged[E[_], G[_], R[_], S[_], Rest[_]](e: Split[E, R, Rest], g: Split[G, S, Rest]): Sub[R, S + E] =
+    val (mine, other) = (numberOf(e), numberOf(g))
+    def inRest(place: Int) = if place > mine then place - 1 else place
+    def inS(place: Int) = if place >= other then place + 1 else place
+    val known = mine.max(other) + 1
+    renaming(List.tabulate(known)(place => if place == mine then 0 else inS(inRest(place)) + 1), known + 1)
+
+trait SubMore extends SubOne:
+  given pure[S[_]]: Sub[Pure, S] = renaming(Nil, -1)
+
+  /** `R + E`: `E`'s place, and `R`'s places, each one further in */
+  given more[R[_], E[_], S[_]](using r: Sub[R, S], e: In[E, S]): Sub[R + E, S] = further(numberOf(e), r)
+
+trait SubOne:
+  given one[E[_], S[_]](using e: In[E, S]): Sub[E, S] = renaming(List(numberOf(e)), -1)
+
+private def renaming[R[_], S[_]](places: List[Int], next: Int): Sub[R, S] = IArray.from(places :+ next)
+private def further[R[_], E[_], S[_]](last: Int, r: Sub[R, S]): Sub[R + E, S] = last +: r
+
+/** the evidence as the machine has it: the numbers */
+private[scala] def numbersOf[R[_], S[_]](sub: Sub[R, S]): IArray[Int] = sub
+
+/** the place in `S` of what is at `place` in `R` */
+private[scala] def renamed(sub: IArray[Int], place: Int): Int =
+  val known = sub.length - 1
+  if place < known then sub(place) else place - known + sub(known)
+
+/** every place keeps its number: a program of `R` is, as it is, a program of `S` */
+private[scala] def keepsPlaces(sub: IArray[Int]): Boolean =
+  val known = sub.length - 1
+  (sub(known) == known || sub(known) == -1) && (0 until known).forall(place => sub(place) == place)
+
+/** THE EFFECT `E` AS THE EVIDENCE IN SCOPE HAS IT. A word bound in a program generic in its row — `State.get` under
+ * `R[_]: Has[State % Int]` — takes its `Int` from here, before the function that follows it is read; with no
+ * evidence in scope it is found anyway, and says nothing. */
+opaque type Known[E[_]] = Int
+
+object Known:
+  given known[E[_], R[_]](using at: In[E, R]): Known[E] = knownBy(at)
+
+private def knownBy[E[_], R[_]](at: In[E, R]): Known[E] = at

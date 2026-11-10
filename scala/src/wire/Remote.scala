@@ -34,62 +34,61 @@ object Far:
   private def arguments(args: Seq[Json]): (String, Json) = "args" -> Json.Arr(args.toList.map(Escapes.enc))
 
   /** the far function's answer */
-  def call[R[_]: Has[Far] : Has[Throws % Condition]](fn: String, args: Json*): Json ! R =
-    start(fn, args*).flatMap(result)
+  def call(fn: String, args: Json*): Json ! Failing = start(fn, args*).flatMap(result)
 
   /** a call begun and not waited for: on a far side that speaks `mux`, others may be answered before it */
-  def start[R[_]: Has[Far]](fn: String, args: Json*): Long ! R =
-    perform[Far](Send("call", List("fn" -> Json.Str(fn), arguments(args))))
+  def start(fn: String, args: Json*): Word[Far, Long] =
+    word(Send("call", List("fn" -> Json.Str(fn), arguments(args))))
 
   /** the answer of a call begun */
-  def result[R[_]: Has[Far] : Has[Throws % Condition]](id: Long): Json ! R =
-    perform[Far](Receive(id)).flatMap(orRaise).map(Escapes.dec)
+  def result(id: Long): Json ! Failing =
+    word(Receive(id)).into[Failing].flatMap(orRaise).map(Escapes.dec)
 
   /** the far function's answer kept on the far side: a ref to it */
-  def hold[R[_]: Has[Far] : Has[Throws % Condition]](fn: String, args: Json*): Json.Ref ! R =
-    ask("call", "fn" -> Json.Str(fn), arguments(args), "held" -> Json.Bool(true)).map(Escapes.dec).flatMap:
+  def hold(fn: String, args: Json*): Json.Ref ! Failing =
+    ask[Failing]("call", "fn" -> Json.Str(fn), arguments(args), "held" -> Json.Bool(true)).map(Escapes.dec).flatMap:
       case ref: Json.Ref => pure(ref)
       case other => Throws.raise(Condition("WireError", s"a ref was expected: $other"))
 
   /** a method of an object held */
-  def method[R[_]: Has[Far] : Has[Throws % Condition]](ref: Json.Ref, name: String, args: Json*)
-      : Json ! R =
-    ask("call", "fn" -> Json.obj("ref" -> Json.Int(ref.id), "method" -> Json.Str(name)), arguments(args))
+  def method(ref: Json.Ref, name: String, args: Json*): Json ! Failing =
+    ask[Failing]("call", "fn" -> Json.obj("ref" -> Json.Int(ref.id), "method" -> Json.Str(name)), arguments(args))
       .map(Escapes.dec)
 
   /** an attribute of an object held */
-  def attr[R[_]: Has[Far] : Has[Throws % Condition]](ref: Json.Ref, name: String): Json ! R =
-    ask("call", "fn" -> Json.obj("ref" -> Json.Int(ref.id), "attr" -> Json.Str(name)), arguments(Nil))
+  def attr(ref: Json.Ref, name: String): Json ! Failing =
+    ask[Failing]("call", "fn" -> Json.obj("ref" -> Json.Int(ref.id), "attr" -> Json.Str(name)), arguments(Nil))
       .map(Escapes.dec)
 
   /** what the ref names is dropped on the far side */
-  def release[R[_]: Has[Far] : Has[Throws % Condition]](ref: Json.Ref): Unit ! R =
-    ask("release", "ref" -> Json.Int(ref.id)).map(_ => ())
+  def release(ref: Json.Ref): Unit ! Failing =
+    ask[Failing]("release", "ref" -> Json.Int(ref.id)).map(_ => ())
 
   /** THE FAR PROGRAM `fn`, as a program of this side: what it asks is asked here as a `Call`, and answered by this
    * side's handlers — once, many times, or never. `callbacks` names what this side offers, for a far side that
    * checks. */
-  def program[R[_]: Has[Far] : Has[Throws % Condition] : Has[Foreign]](fn: String, args: List[Json],
-      callbacks: List[String] = Nil): Json ! R =
-    perform[Far](Run).flatMap: number =>
+  def program(fn: String, args: List[Json], callbacks: List[String] = Nil): Json ! Failing + Foreign =
+    type R[X] = (Failing + Foreign)[X]
+    word(Run).flatMap: number =>
       val run = "run" -> Json.Int(number)
       def node(ok: Json): Json ! R = ok("perform") match
         case Json.Str(name) =>
-          perform[Foreign](Call(name, Escapes.items(ok("args")).map(Escapes.dec)))
-            .flatMap(answer => ask("continue", run, "k" -> ok("k"), "answer" -> Escapes.enc(answer)))
+          word(Call(name, Escapes.items(ok("args")).map(Escapes.dec)))
+            .flatMap(answer => ask[R]("continue", run, "k" -> ok("k"), "answer" -> Escapes.enc(answer)))
             .flatMap(node)
         case _ => pure(Escapes.dec(ok("done")))
       val offered = Option.when(callbacks.nonEmpty)("callbacks" -> Json.Arr(callbacks.map(Json.Str(_))))
-      ask("program", List(run, "fn" -> Json.Str(fn), arguments(args)) ++ offered*).flatMap(node)
+      ask[R]("program", List(run, "fn" -> Json.Str(fn), arguments(args)) ++ offered*).flatMap(node)
 
   /** THE FAR FUNCTION'S STREAM, as a stream of this side: it sends what the far side sends. The far side runs at
    * most `credit` chunks ahead of whoever takes them here. With an `input`, that stream is fed to the far function,
    * under the far side's credit, while this one is pulled. */
-  def stream[R[_]: Has[Far] : Has[Throws % Condition] : Has[Emit % Json]](fn: String, args: List[Json],
-      credit: Int, input: Option[Unit ! Emit % Json] = None): Unit ! R =
+  def stream(fn: String, args: List[Json], credit: Int, input: Option[Unit ! Emit % Json] = None)
+      : Unit ! Failing + Emit % Json =
+    type R[X] = (Failing + Emit % Json)[X]
     def fed = input.map(Emit.pull(_).map(Escapes.enc))
-    defer(perform[Far](Open(fn, args.map(Escapes.enc), credit, fed))).flatMap(orRaise).flatMap: stream =>
-      def rest: Unit ! R = perform[Far](Pull(stream)).flatMap(orRaise).flatMap:
+    defer(word(Open(fn, args.map(Escapes.enc), credit, fed)).into[R]).flatMap(orRaise).flatMap: stream =>
+      def rest: Unit ! R = word(Pull(stream)).into[R].flatMap(orRaise).flatMap:
         case Some(chunk) => Emit.send(Escapes.dec(chunk)).flatMap(_ => rest)
         case None => unit
       rest

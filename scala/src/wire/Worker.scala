@@ -11,7 +11,7 @@ enum Fed[X]:
 
 object Fed:
   /** the caller's next value, waited for; none at the stream's end */
-  def next[R[_]](using In[Fed, R]): Option[Json] ! R = perform[Fed](Next)
+  def next: Word[Fed, Option[Json]] = word(Next)
 
 /** THE FAR SIDE: a module served to a host, over the wire. Every function is a program, and what it asks decides
  * what crosses:
@@ -314,7 +314,7 @@ private final class Worker(module: Worker.Module, link: Link, secret: Option[Str
           link.send(Json.obj("stream" -> Json.Int(out.id), "chunk" -> Escapes.enc(value)))
           Some(k(()))
         else
-          out.waiting = Some(() => advance(task, Emit.send[Json, Row](value).flatMap(k)))
+          out.waiting = Some(() => advance(task, Emit.send(value).flatMap(k)))
           None
       case _ => nothing(op)
 
@@ -328,7 +328,7 @@ private final class Worker(module: Worker.Module, link: Link, secret: Option[Str
           Some(k(Some(in.values.dequeue())))
         else if in.ended then Some(k(None))
         else
-          in.waiting = Some(() => advance(task, Fed.next[Row].flatMap(k)))
+          in.waiting = Some(() => advance(task, Fed.next.flatMap(k)))
           None
       case _ => Some(k(None))
 

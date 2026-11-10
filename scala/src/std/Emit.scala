@@ -8,7 +8,7 @@ enum Emit[T, X]:
   case Send[T](value: T) extends Emit[T, Unit]
 
 object Emit:
-  def send[T, R[_]](value: T)(using In[Emit % T, R]): Unit ! R = perform[Emit % T](Send(value))
+  def send[T](value: T): Word[Emit % T, Unit] = word(Send(value))
 
   /** every value of a sequence, which may be lazy and endless */
   def sendAll[T, R[_]](values: IterableOnce[T])(using In[Emit % T, R]): Unit ! R =
@@ -27,10 +27,12 @@ object Emit:
     handle(p, Handler.general[Emit % T, Rest, A, A](pure)([X] => (op: Emit[T, X], k: X => A ! Rest) => op match
       case Send(value) => f(value).flatMap(k)))
 
-  /** a stream of the values, each through `f`: sent to the `Emit % U` of the row outside */
-  def map[T, U, R[_], Rest[_], A](f: T => U)(p: A ! R)(using Split[Emit % T, R, Rest], In[Emit % U, Rest])
-      : A ! Rest =
-    each[T, R, Rest, A](value => send(f(value)))(p)
+  /** a stream of the values, each through `f`: a new stream. Its row `S` is `R` with `Emit % U` for `Emit % T`:
+   * the one expected, or with nothing said the new stream last. The program is put into the row of both streams,
+   * and the old one is handled there. */
+  def map[T, U, R[_], Rest[_], S[_], A](f: T => U)(p: A ! R)(
+      using from: Split[Emit % T, R, Rest], to: Split[Emit % U, S, Rest]): A ! S =
+    each[T, S + Emit % T, S, A](value => send(f(value)))(p.into(using Sub.exchanged(from, to)))
 
   /** a stream of the values that `keep`: an interceptor — those kept are sent on, to the stream's handler */
   def filter[T, R[_], A](keep: T => Boolean)(p: A ! R)(using In[Emit % T, R]): A ! R =

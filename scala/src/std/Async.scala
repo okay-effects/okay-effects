@@ -14,7 +14,7 @@ enum Async[X]:
 
 object Async:
   /** the answer `register` will be called back with */
-  def await[X, R[_]](register: (X => Unit) => Unit)(using In[Async, R]): X ! R = perform[Async](Await(register))
+  def await[X](register: (X => Unit) => Unit): Word[Async, X] = word(Await(register))
 
   private lazy val timer =
     ScheduledThreadPoolExecutor(1, runnable =>
@@ -23,7 +23,7 @@ object Async:
       thread
     )
 
-  def sleep[R[_]](millis: Long)(using In[Async, R]): Unit ! R =
+  def sleep(millis: Long): Word[Async, Unit] =
     await(resume => { timer.schedule((() => resume(())): Runnable, millis, TimeUnit.MILLISECONDS); () })
 
   /** the program started; `done` is called with its value, now or later. Returns as soon as the program waits. */
@@ -53,7 +53,7 @@ object Async:
           next = synchronized { val turn = ready.poll(); if turn == null then running = false; turn }
 
   /** both programs at once; their values when both have come */
-  def both[A, B, R[_]](a: A ! Async, b: B ! Async)(using In[Async, R]): (A, B) ! R = await: resume =>
+  def both[A, B](a: A ! Async, b: B ! Async): Word[Async, (A, B)] = await: resume =>
     val lock = Object()
     var left = Option.empty[A]
     var right = Option.empty[B]
@@ -61,17 +61,17 @@ object Async:
     start(b)(y => lock.synchronized { right = Some(y); left }.foreach(x => resume((x, y))))
 
   /** all the programs at once; their values, in the programs' order */
-  def all[A, R[_]](ps: List[A ! Async])(using In[Async, R]): List[A] ! R = await: resume =>
-    start(ps.foldRight(pure[List[A], Async](Nil))((p, rest) => both[A, List[A], Async](p, rest).map(_ :: _)))(resume)
+  def all[A](ps: List[A ! Async]): Word[Async, List[A]] = await: resume =>
+    start(ps.foldRight(pure[List[A], Async](Nil))((p, rest) => both(p, rest).map(_ :: _)))(resume)
 
   /** both programs at once; the value that comes first — the other's is dropped */
-  def race[A, R[_]](a: A ! Async, b: A ! Async)(using In[Async, R]): A ! R = await: resume =>
+  def race[A](a: A ! Async, b: A ! Async): Word[Async, A] = await: resume =>
     val won = AtomicBoolean(false)
     start(a)(x => if won.compareAndSet(false, true) then resume(x))
     start(b)(x => if won.compareAndSet(false, true) then resume(x))
 
   /** the future's outcome, awaited */
-  def fromFuture[A, R[_]](future: => Future[A])(using ExecutionContext, In[Async, R]): Try[A] ! R =
+  def fromFuture[A](future: => Future[A])(using ExecutionContext): Word[Async, Try[A]] =
     await(resume => future.onComplete(resume))
 
   def toFuture[A](p: A ! Async): Future[A] =

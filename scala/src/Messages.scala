@@ -8,16 +8,24 @@ import scala.quoted.*
 object Messages:
   def notIn[E[_]: Type, R[_]: Type](using Quotes): Expr[Nothing] =
     import quotes.reflect.*
-    report.errorAndAbort(s"the effect ${written(TypeRepr.of[E])} is not in the row ${written(TypeRepr.of[R])}")
+    report.errorAndAbort(missing(TypeRepr.of[E], TypeRepr.of[R]))
+
+  /** a row of one effect may be one nobody wrote — a word with no row expected of it is a program of its effect
+   * alone — so the message says how a row is said */
+  private def missing(using Quotes)(effect: quotes.reflect.TypeRepr, row: quotes.reflect.TypeRepr): String =
+    val alone = !row.typeSymbol.isTypeParam && written(row) != "Pure" && !written(row).contains(" + ")
+    val hint = if !alone then "" else ". If this row was not said, it is the row of a word alone: declare the " +
+      "program's type — `val p: A ! Row = ...` — or say the row on its first word — `.into[Row]`"
+    s"the effect ${written(effect)} is not in the row ${written(row)}$hint"
 
   /** a handler's `Split`: the effect not in the row — or in it, and the row without it is not the one asked for */
   def notSplit[E[_]: Type, R[_]: Type, Rest[_]: Type](using Quotes): Expr[Nothing] =
     import quotes.reflect.*
     val (e, r) = (written(TypeRepr.of[E]), written(TypeRepr.of[R]))
     val effects = r.replace("(", "").replace(")", "").split(" \\+ ").toSet
-    if !effects(e) then report.errorAndAbort(s"the effect $e is not in the row $r")
+    if !effects(e) then report.errorAndAbort(missing(TypeRepr.of[E], TypeRepr.of[R]))
     else report.errorAndAbort(s"the row $r without the effect $e is not ${written(TypeRepr.of[Rest])}: a handler " +
-      "leaves the row as it is written, its effect taken out — `Pure + B`, not `B`, if it was first")
+      "leaves the row as it is written, its effect taken out")
 
   /** a row or an effect as it is written: `+` and `%` for the lambdas they make, `Pure` for `Void` */
   def written(using Quotes)(t: quotes.reflect.TypeRepr): String =
