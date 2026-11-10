@@ -109,9 +109,28 @@ private[scala] object Machine:
   /** a program of the row `R` in the row `S`: no handler, the places renamed */
   final class Renamed[R[_], S[_], A, W, P[_], Z](val sub: Sub[R, S], val outside: Frames[S, A, W],
       val below: Level[S, W, P, Z]) extends Level[R, A, P, Z] with Part[R, A, S, W]:
-    def over[P2[_], Z2](under: Level[S, W, P2, Z2]): Level[R, A, P2, Z2] = Renamed(sub, outside, under)
+    def over[P2[_], Z2](under: Level[S, W, P2, Z2]): Level[R, A, P2, Z2] = renaming(sub, outside, under)
     def left[P2[_], Z2](under: Level[S, W, P2, Z2], to: AnyRef): Level[R, A, P2, Z2] =
       Renamed(sub, Unwinding(outside, to), under)
+
+  /** A LEVEL THAT RENAMES, PUT ON `below` — a level a continuation took, or the one that stands for the rest of a
+   * whole run (`Whole`). When nothing waits between it and a level under it that renames nothing — the rest of a
+   * run resumed where a run ends — the two are one level, and that one is not kept: so a program stepped and
+   * resumed in a loop, however long, is under one such level, and not under one for every turn. */
+  private def renaming[R[_], S[_], A, W, P[_], Z](sub: Sub[R, S], outside: Frames[S, A, W],
+      below: Level[S, W, P, Z]): Level[R, A, P, Z] = outside match
+    case _: End[?, ?] => below match
+      case lower: Renamed[s, t, ?, w, p, ?] => onto[R, s, t, A, w, p, Z](sub, lower.sub, lower.outside, lower.below)
+      case _ => Renamed(sub, outside, below)
+    case _ => Renamed(sub, outside, below)
+
+  /** the level of `sub` over that of `lower`, nothing between them: the one that renames, when the other does not */
+  private def onto[R[_], S[_], T[_], A, W, P[_], Z](sub: Sub[R, S], lower: Sub[S, T], outside: Frames[T, A, W],
+      below: Level[T, W, P, Z]): Level[R, A, P, Z] = lower match
+    case Sub.Same() => Renamed[R, S, A, W, P, Z](sub, outside, below)
+    case _ => sub match
+      case Sub.Same() => Renamed[R, T, A, W, P, Z](lower, outside, below)
+      case _ => Renamed[R, S, A, A, P, Z](sub, End[S, A](), Renamed[S, T, A, W, P, Z](lower, outside, below))
 
   /** WHERE A GENERAL HANDLER WAS, while its `k` is unwound: the handler has left, and answers nothing. An
    * operation of its place that a finalizer asks goes outside if the handler kept its effect in the row
@@ -134,6 +153,12 @@ private[scala] object Machine:
   final class None[R[_], V]() extends Taken[R, V, R, V]
   final class More[R0[_], V0, R1[_], V1, R[_], V](val inner: Taken[R0, V0, R1, V1], val part: Part[R1, V1, R, V])
       extends Taken[R0, V0, R, V]
+
+  /** how many levels were taken, and `n` */
+  @tailrec
+  private def count[R0[_], V0, R[_], V](taken: Taken[R0, V0, R, V], n: Int): Int = taken match
+    case _: None[?, ?] => n
+    case more: More[r0, ?, r1, v1, ?, ?] => count[r0, V0, r1, v1](more.inner, n + 1)
 
   /** the levels taken, put back on `onto` */
   @tailrec
@@ -165,6 +190,7 @@ private[scala] object Machine:
   final class Under[R0[_], V0, X, E[_], R[_], Out[_], A, B](val inner: Frames[R0, X, V0],
       taken: Taken[R0, V0, R, A], way: Way[E, R, Out], handler: Handler.General[E, Out, A, B])
       extends K[R0, V0, X, Out, B]:
+    def levels: Int = count(taken, 1)
     def over[W, P[_], Z](outside: Frames[Out, B, W], below: Level[Out, W, P, Z]): Level[R0, V0, P, Z] =
       put(taken, General(way, handler, outside, below))
     def left[W, P[_], Z](end: Unwound[Out, W], below: Level[Out, W, P, Z]): Level[R0, V0, P, Z] =
@@ -173,8 +199,9 @@ private[scala] object Machine:
   /** the rest of the whole run, after an operation no handler answered */
   final class Whole[R0[_], V0, X, P0[_], Z0](val inner: Frames[R0, X, V0], taken: Taken[R0, V0, P0, Z0])
       extends K[R0, V0, X, P0, Z0]:
+    def levels: Int = count(taken, 0)
     def over[W, P[_], Z](outside: Frames[P0, Z0, W], below: Level[P0, W, P, Z]): Level[R0, V0, P, Z] =
-      put(taken, Renamed(Sub.Same(), outside, below))
+      put(taken, renaming(Sub.Same[P0](), outside, below))
     def left[W, P[_], Z](end: Unwound[P0, W], below: Level[P0, W, P, Z]): Level[R0, V0, P, Z] =
       putLeft(taken, Renamed[P0, P0, Z0, W, P, Z](Sub.Same(), end, below), end)
 

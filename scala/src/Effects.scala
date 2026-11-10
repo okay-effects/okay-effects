@@ -106,6 +106,8 @@ final class NoUnwinding extends RuntimeException("the rest of an unwinding was r
 abstract class Continuation[-X, R[_], +B] private[scala] () extends (X => B ! R):
   /** this continuation left: its finalizers, then `()` */
   def unwind: Unit ! R
+  /** how many levels it holds: what the tests count, of a loop that must gather none */
+  private[scala] def levels: Int
 
 /** A handler's state, read and written by its clause while it answers. */
 abstract class Cell[S] private[scala] (private[scala] var state: S):

@@ -219,8 +219,13 @@ class WireTests extends munit.FunSuite:
         val taken = Emit.take(4)(Far.stream("t:numbers", List(Json.Int(1000)), credit))
         assertEquals(remote.run(Throws.run(Emit.collect(taken))).map(_._1.length), Right(4))
         assertEquals(remote.run(Throws.run(Far.call("t:sent"))), Right(Json.Int(4L + credit)))
+      val began = System.nanoTime()
       val all = Emit.collect(Far.stream("t:numbers", List(Json.Int(50000)), credit = 64))
       assertEquals(remote.run(Throws.run(all)).map(_._1.length), Right(50000))
+      // far inside the test's time: a level kept at every chunk, by a worker that steps its function, took twenty
+      // seconds here, where this takes a tenth of one (Properties counts the levels, whatever the clock says)
+      val seconds = (System.nanoTime() - began) / 1e9
+      assert(seconds < 5, s"fifty thousand chunks took $seconds s")
       val fed = Emit.sendAll(Iterator.from(0).take(20000).map(i => Json.Int(i % 1000)))
       val distinct = Emit.collect(Far.stream("t:dedup", Nil, credit = 2, input = Some(fed)))
       assertEquals(remote.run(Throws.run(distinct)).map(_._1), Right(List.tabulate(1000)(i => Json.Int(i))))

@@ -655,3 +655,64 @@ class Properties extends munit.FunSuite:
       case asked: Step.Asked[Account, ?, ?, Int] =>
         assertEquals(logged(step(asked.k.unwind)), (Step.Done[Account, Unit](()), List("closed")))
       case _ => fail("an operation was expected")
+
+  // ---- what a loop must not gather: the levels its continuations hold, counted — whatever the clock says
+
+  type Sends[X] = (Emit % Int)[X]
+  type Counted[X] = (Emit % Int + State % Int)[X]
+
+  def numbers[R[_]: Has[Emit % Int]](n: Int): Unit ! R =
+    if n == 0 then unit else Emit.send(n).flatMap(_ => numbers(n - 1))
+
+  /** a program stepped from outside, as the wire's worker steps a function: each send answered and the rest
+   * resumed, at once or — every `waits`-th — after the send is asked again, as when the stream has no credit.
+   * The values sent, and the most levels a continuation held. */
+  def stepped(p: Unit ! Sends, waits: Int = 0): (Int, Int) =
+    var (next, sent, most, turn) = (Option(p), 0, 0, 0)
+    while next.isDefined do
+      next = step(next.get) match
+        case asked: Step.Asked[Sends, ?, ?, Unit] =>
+          most = most.max(asked.k.levels)
+          turn += 1
+          asked.of[Emit % Int].map(the => the.op match
+            case Emit.Send(value) =>
+              if waits > 0 && turn % waits == 0 then Emit.send(value).flatMap(the.k)
+              else
+                sent += 1
+                the.k(()))
+        case _ => None
+    (sent, most)
+
+  /** the program's sends answered by a general handler that resumes: the most levels a continuation held */
+  def resumed[R[_], Rest[_]](p: Unit ! R)(using Split[Emit % Int, R, Rest]): Int ! Rest =
+    var most = 0
+    handle(p, Handler.control[Emit % Int, Rest, Unit, Int](_ => pure(most))(
+      [X] => (op: Emit[Int, X], k: Continuation[X, Rest, Int]) => op match
+        case Emit.Send(_) =>
+          most = most.max(k.levels)
+          k(())))
+
+  test("a program stepped and resumed in a loop: its continuations hold no more levels, however long it is"):
+    assertEquals(stepped(numbers(1000)), (1000, 1))
+    assertEquals(stepped(numbers(2000)), (2000, 1))
+    assertEquals(stepped(numbers(1000), waits = 3), (1000, 1))
+    assertEquals(stepped(numbers(2000), waits = 3), (2000, 1))
+    // under a handler, and with a program of a smaller row bound at every turn
+    def sends(n: Int): Unit ! Counted =
+      if n == 0 then unit else tick.flatMap(_ => Emit.send(n).flatMap(_ => sends(n - 1)))
+    def counted(n: Int): Unit ! Sends = State.run(0)(sends(n)).map((s, _) => assertEquals(s, n))
+    assertEquals(stepped(counted(1000), waits = 3), (1000, 2))
+    assertEquals(stepped(counted(2000), waits = 3), (2000, 2))
+    assertEquals(stepped(counted(200_000))._1, 200_000)
+
+  test("a loop that binds programs of a smaller row: its continuations hold no more levels, however long it is"):
+    val send: Unit ! Counted = State.get[Int].flatMap(s => Emit.send(s))
+    def before(n: Int): Unit ! App + Emit % Int = if n == 0 then unit else send.flatMap(_ => before(n - 1))
+    def after(n: Int): Unit ! App + Emit % Int = if n == 0 then unit else after(n - 1).flatMap(_ => send)
+    def among(n: Int): Unit ! App + Emit % Int =
+      if n == 0 then unit else tick.flatMap(_ => Emit.send(n).flatMap(_ => among(n - 1)))
+    def levels(p: Unit ! App + Emit % Int): Int = run(Reader.run(0)(State.run(0)(Writer.run(resumed(p)))))._2._2
+    // the embedding the send is in, and the handler: an embedding that has ended has left nothing
+    assertEquals((levels(before(1000)), levels(before(2000))), (2, 2))
+    assertEquals((levels(after(1000)), levels(after(2000))), (2, 2))
+    assertEquals((levels(among(1000)), levels(among(2000))), (1, 1))
