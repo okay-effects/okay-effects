@@ -1,6 +1,6 @@
-package okay.algebraic.scala3.wire
+package okay.effects.scala.wire
 
-import okay.algebraic.scala3.*
+import okay.effects.scala.*
 import java.io.{BufferedReader, InputStreamReader, PrintStream}
 import scala.collection.mutable
 
@@ -23,7 +23,7 @@ object Worker:
 
   def serve(programs: Programs, in: BufferedReader = BufferedReader(InputStreamReader(System.in)),
       out: PrintStream = System.out): Unit =
-    val kept = mutable.Map.empty[(Long, Long), Rest[Foreign, Json, Json]]
+    val kept = mutable.Map.empty[(Long, Long), Json => Json ! Foreign]
     var counter = 0L
 
     def node(run: Long, p: Json ! Foreign): Json = step(p) match

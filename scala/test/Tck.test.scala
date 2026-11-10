@@ -1,6 +1,6 @@
-package okay.algebraic.scala3
+package okay.effects.scala
 
-import okay.algebraic.scala3.std.Choose
+import okay.effects.scala.std.Choose
 import scala.util.Random
 
 /** THE FAMILY'S TCK (okay-kernel, tck/Tck.scala): a thousand random programs — handlers of logs, states, failures and
@@ -52,29 +52,30 @@ object Tck:
 
   def writer(e: Int)(p: Int ! Row): Int ! Row =
     intercept(new Handler[Log, Int, (Int, Int), Row]:
+      override def mine(op: Log) = op match { case Tell(`e`, _) => true; case _ => false }
       def ret(a: Int) = pure((0, a))
       def on[X](op: Log & Op[Log, X], k: X => (Int, Int) ! Row) = op match
-        case Tell(`e`, n) => k(()).map((sum, a) => (sum + n, a))
-        case _ => perform(op).flatMap(k)
+        case Tell(_, n) => k(()).map((sum, a) => (sum + n, a))
     )(p).map((sum, a) => a * 100 + sum)
 
-  /** the TCK's state is a cell, made where the handler is installed: one for every resumption taken past it */
+  /** the TCK's state is a cell made where the handler is installed: one for every resumption taken past it —
+   * not the state of `std.State`, which each path has its own */
   def state(e: Int, s0: Int)(p: Int ! Row): Int ! Row =
     var s = s0
-    intercept(new Handler[Cell, Int, Int, Row]:
-      def ret(a: Int) = pure(a * 10 + s)
-      def on[X](op: Cell & Op[Cell, X], k: X => Int ! Row) = op match
-        case Get(`e`) => k(s)
-        case Put(`e`, n) => s = n; k(())
-        case _ => perform(op).flatMap(k)
-    )(p)
+    intercept(new InPlace[Cell, Unit, Int, Int, Row]:
+      override def mine(op: Cell) = op match { case Get(`e`) | Put(`e`, _) => true; case _ => false }
+      def ret(state: Unit, a: Int) = pure(a * 10 + s)
+      def answer[X](state: okay.effects.scala.Cell[Unit], op: Cell & Op[Cell, X]): X = op match
+        case Get(_) => s
+        case Put(_, n) => s = n
+    , ())(p)
 
   def throws(e: Int)(p: Int ! Row): Int ! Row =
     intercept(new Handler[Fail, Int, Int, Row]:
+      override def mine(op: Fail) = op match { case Raise(`e`, _) => true; case _ => false }
       def ret(a: Int) = pure(a)
       def on[X](op: Fail & Op[Fail, X], k: X => Int ! Row) = op match
-        case Raise(`e`, n) => pure(-1 - n)
-        case _ => perform(op).flatMap(k)
+        case Raise(_, n) => pure(-1 - n)
     )(p)
 
   def build(t: T): Int ! Row = t match

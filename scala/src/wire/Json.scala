@@ -1,4 +1,4 @@
-package okay.algebraic.scala3.wire
+package okay.effects.scala.wire
 
 /** JSON, as much as the wire needs: a value, its text, and the value of a text. */
 enum Json:

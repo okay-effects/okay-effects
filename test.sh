@@ -25,7 +25,7 @@ ok $? "rust: $(grep -c '\.\.\. ok$' /tmp/okay-effects-rust.log) tests (/tmp/okay
 
 demo() { # the demonstration of a language, as a command
   case $1 in
-    scala) echo "java -cp $SCALA_CP okay.algebraic.scala3.wire.wireDemo $2" ;;
+    scala) echo "java -cp $SCALA_CP okay.effects.scala.wire.wireDemo $2" ;;
     java) echo "java -cp java/out okay.algebraic.wire.Demo $2" ;;
     rust) echo "rust/target/debug/examples/demo $2" ;;
   esac

@@ -1,6 +1,6 @@
-package okay.algebraic.scala3.wire
+package okay.effects.scala.wire
 
-import okay.algebraic.scala3.*
+import okay.effects.scala.*
 
 /** The demonstration every language of this repository has, the same: three programs served by a worker, and a
  * host that runs a worker's programs with its own handlers. Any host with any worker prints the same lines. */
