@@ -11,6 +11,15 @@ pub enum Json {
     Str(String),
     Arr(Vec<Json>),
     Obj(Vec<(String, Json)>),
+    /// not JSON: something the far side keeps, known here by a number. On the wire it is the escape `ref`.
+    Ref(Ref),
+}
+
+/// What a far side keeps for this one: its number there, and the kind of what is kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ref {
+    pub id: i64,
+    pub kind: String,
 }
 
 impl Json {
@@ -77,6 +86,10 @@ impl fmt::Display for Json {
                     write!(f, ":{value}")?;
                 }
                 write!(f, "}}")
+            }
+            Json::Ref(r) => {
+                let fields = [("t", Json::str("ref")), ("id", Json::Int(r.id)), ("type", Json::str(&r.kind))];
+                write!(f, "{}", Json::obj(fields))
             }
         }
     }
@@ -167,11 +180,18 @@ impl Parser<'_> {
                     Some(b'b') => out.push(8),
                     Some(b'f') => out.push(12),
                     Some(b'u') => {
-                        let hex = self.text.get(self.at + 1..self.at + 5).and_then(|h| std::str::from_utf8(h).ok());
-                        let code = hex.and_then(|h| u32::from_str_radix(h, 16).ok()).and_then(char::from_u32);
-                        let c = code.ok_or_else(|| self.fail("four hex digits"))?;
+                        let mut code = self.hex()?;
+                        // a character beyond 16 bits is written as two: a surrogate pair
+                        if (0xd800..0xdc00).contains(&code) && self.text[self.at + 1..].starts_with(b"\\u") {
+                            let high = self.at;
+                            self.at += 2;
+                            match self.hex()? {
+                                low @ 0xdc00..0xe000 => code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00),
+                                _ => self.at = high,
+                            }
+                        }
+                        let c = char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER);
                         out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
-                        self.at += 4;
                     }
                     Some(c) => out.push(*c),
                     None => return Err(self.fail("the end of a string")),
@@ -194,10 +214,54 @@ impl Parser<'_> {
             self.at += 1;
         }
         let digits = std::str::from_utf8(&self.text[from..self.at]).unwrap_or("");
-        if digits.contains(['.', 'e', 'E']) {
-            digits.parse().map(Json::Dec).map_err(|_| self.fail("a number"))
-        } else {
-            digits.parse().map(Json::Int).map_err(|_| self.fail("a value"))
+        // with a fraction or an exponent it is a float; so is an integer too long for 64 bits
+        match digits.parse() {
+            Ok(whole) => Ok(Json::Int(whole)),
+            Err(_) => digits.parse().map(Json::Dec).map_err(|_| self.fail("a value")),
         }
+    }
+
+    /// The four hex digits after a `\u`, which `at` is on; `at` is left on the last of them.
+    fn hex(&mut self) -> Result<u32, String> {
+        let digits = self.text.get(self.at + 1..self.at + 5).and_then(|hex| std::str::from_utf8(hex).ok());
+        let code = digits.and_then(|hex| u32::from_str_radix(hex, 16).ok());
+        let code = code.ok_or_else(|| self.fail("four hex digits"))?;
+        self.at += 4;
+        Ok(code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_text_is_read_to_the_value_that_prints_it() {
+        let text = r#"{"a":[1,-2,3.5,1e-7,true,false,null],"b":{"c":"x\ny \"z\" \\ é"},"d":[]}"#;
+        assert_eq!(Json::parse(text).unwrap().to_string(), text);
+        let spaced = Json::parse(r#" { "a" : [ 1 , 2 ] } "#);
+        assert_eq!(spaced, Ok(Json::obj([("a", Json::Arr(vec![Json::Int(1), Json::Int(2)]))])));
+        assert!(Json::parse(r#"{"a":1} x"#).is_err());
+        assert!(Json::parse("").is_err());
+    }
+
+    #[test]
+    fn a_number_with_a_fraction_or_an_exponent_is_a_float_any_other_an_integer() {
+        assert_eq!(Json::parse("3.0"), Ok(Json::Dec(3.0)));
+        assert_eq!(Json::parse("3"), Ok(Json::Int(3)));
+        assert_eq!(Json::parse("-2e3"), Ok(Json::Dec(-2000.0)));
+        assert_eq!(Json::parse("9223372036854775807"), Ok(Json::Int(i64::MAX)));
+        // an integer too long for 64 bits is a float
+        assert_eq!(Json::parse("9223372036854775808"), Ok(Json::Dec(9223372036854775808.0)));
+        assert_eq!(Json::Dec(3.0).to_string(), "3.0");
+        assert_eq!(Json::Dec(1e300).to_string(), "1e300");
+    }
+
+    #[test]
+    fn a_character_escaped_in_one_unit_of_16_bits_or_in_two() {
+        assert_eq!(Json::parse(r#""é😀""#), Ok(Json::str("é😀")));
+        assert_eq!(Json::parse(r#""\ud83d!\ud83dA""#), Ok(Json::str("\u{fffd}!\u{fffd}A")));
+        assert_eq!(Json::str("a\u{1}\t😀").to_string(), r#""a\u0001\t😀""#);
+        assert!(Json::parse(r#""\u00"#).is_err());
     }
 }
