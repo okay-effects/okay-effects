@@ -4,15 +4,18 @@
 //! most of its time. Measured with examples/bench.rs, boxes against this: `state` 35 → 25 ns an operation,
 //! `reader3` 31 → 22, `choose` 275 → 238, `binds` 24 → 17.
 //!
-//! This is the kernel's only `unsafe`. It is sound because the room is written once, in `new`, with a `T` that
-//! fits it in size and alignment, and `kind` says which; it is read only as that `T` — `take` and `get` compare
-//! the type first, `drop` is the function made for it; and it is read out at most once — `take` forgets the
-//! value it emptied, so `drop` does not see it. A value may hold an `Rc`, so the marker keeps it on its thread.
+//! The kernel's `unsafe` is here and in pool.rs, whose boxes these are. This is sound because the room is written
+//! once, in `new`, with a `T` that fits it in size and alignment, and `kind` says which; it is read only as that
+//! `T` — `take` and `get` compare the type first, `drop` is the function made for it; and it is read out at most
+//! once — `take` forgets the value it emptied, so `drop` does not see it. A value may hold an `Rc`, so the marker
+//! keeps it on its thread.
 
 use std::any::TypeId;
 use std::marker::PhantomData;
 use std::mem::{MaybeUninit, forget};
 use std::rc::Rc;
+
+use crate::pool::Owned;
 
 type Room = MaybeUninit<[usize; 2]>;
 
@@ -31,13 +34,13 @@ struct Kind {
 struct Of<A>(PhantomData<A>);
 
 impl<A: 'static> Of<A> {
-    /// an `A` is kept as itself if it fits the room, as a `Box<A>` if not
+    /// an `A` is kept as itself if it fits the room, as an `Owned<A>` — a box of the pool — if not
     const FITS: bool = size_of::<A>() <= size_of::<Room>() && align_of::<A>() <= align_of::<Room>();
     const KIND: &'static Kind =
-        &Kind { id: TypeId::of::<A>(), drop: if Self::FITS { drop_kept::<A> } else { drop_kept::<Box<A>> } };
+        &Kind { id: TypeId::of::<A>(), drop: if Self::FITS { drop_kept::<A> } else { drop_kept::<Owned<A>> } };
 }
 
-/// SAFETY: a `T` fits the room: it is an `A` that `FITS`, or a `Box<A>`, which is one word
+/// SAFETY: a `T` fits the room: it is an `A` that `FITS`, or an `Owned<A>`, which is one word
 unsafe fn put<T>(kept: T) -> Room {
     let mut room = Room::uninit();
     unsafe { room.as_mut_ptr().cast::<T>().write(kept) };
@@ -56,7 +59,7 @@ unsafe fn drop_kept<T>(room: &mut Room) {
 impl Val {
     pub(crate) fn new<A: 'static>(a: A) -> Val {
         // SAFETY: what is put fits, by the test
-        let room = if Of::<A>::FITS { unsafe { put(a) } } else { unsafe { put(Box::new(a)) } };
+        let room = if Of::<A>::FITS { unsafe { put(a) } } else { unsafe { put(Owned::new(a)) } };
         Val { kind: Of::<A>::KIND, room, here: PhantomData }
     }
 
@@ -69,11 +72,11 @@ impl Val {
         if self.kind.id != TypeId::of::<A>() {
             return None;
         }
-        // SAFETY: the room holds an `A` or a `Box<A>`, as `new` chose by the same test
+        // SAFETY: the room holds an `A` or an `Owned<A>`, as `new` chose by the same test
         Some(if Of::<A>::FITS {
             unsafe { &*self.room.as_ptr().cast::<A>() }
         } else {
-            unsafe { &**self.room.as_ptr().cast::<Box<A>>() }
+            unsafe { &**self.room.as_ptr().cast::<Owned<A>>() }
         })
     }
 
@@ -83,7 +86,7 @@ impl Val {
         let a = if Of::<A>::FITS {
             unsafe { out::<A>(&mut self.room) }
         } else {
-            *unsafe { out::<Box<A>>(&mut self.room) }
+            unsafe { out::<Owned<A>>(&mut self.room) }.into_inner()
         };
         forget(self);
         a

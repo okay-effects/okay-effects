@@ -18,12 +18,13 @@ use std::iter::once;
 use std::mem::{replace, take};
 use std::rc::Rc;
 
+use crate::pool::{Shared, With};
 use crate::val::Val;
 
 /// the state of a handler in place
 pub(crate) type State = Rc<dyn std::any::Any>;
 /// the levels of a continuation, the lowest first
-pub(crate) type Pieces = Rc<[Level]>;
+pub(crate) type Pieces = Shared<[Level]>;
 
 /// A computation.
 pub(crate) enum Node {
@@ -32,24 +33,27 @@ pub(crate) enum Node {
     /// a question: an operation, to be answered
     Ask(Val),
     /// a computation, and what follows its value
-    Bind(Rc<Frame>),
+    Bind(Shared<Frame>),
     /// a computation under a handler, with the handler's state
     Handle(Box<(Rc<Mark>, State, Node)>),
     /// a continuation taken earlier, resumed with an answer
     Resume(Pieces, Val),
 }
 
-/// What follows a value, inside one level. A bind is made as a frame not yet linked: when the machine reaches it,
-/// `first` is taken to be run and the frames already waiting are put in `rest`. Nobody else holds it until then;
-/// after, it is never written again.
-pub(crate) struct Frame<F: ?Sized = dyn Fn(Val) -> Node> {
+/// What follows a value, inside one level: `next`, a function of the value. A bind is made as a frame not yet
+/// linked: when the machine reaches it, `first` is taken to be run and the frames already waiting are put in
+/// `rest`. Nobody else holds it until then; after, it is never written again. Its memory is the pool's (pool.rs):
+/// a frame is let go when its value comes, and the next bind takes the room it leaves.
+pub(crate) type Frame = With<Waits, dyn Fn(Val) -> Node>;
+
+/// what a frame holds beside its function
+pub(crate) struct Waits {
     first: Option<Node>,
-    rest: Option<Rc<Frame>>,
-    next: F,
+    rest: Option<Shared<Frame>>,
 }
 
 pub(crate) fn bind(first: Node, next: impl Fn(Val) -> Node + 'static) -> Node {
-    Node::Bind(Rc::new(Frame { first: Some(first), rest: None, next }))
+    Node::Bind(Shared::new(Waits { first: Some(first), rest: None }, next))
 }
 
 /// A handler, as the machine sees it.
@@ -76,7 +80,7 @@ impl Mark {
 
 #[derive(Clone, Default)]
 pub(crate) struct Level {
-    frames: Option<Rc<Frame>>,
+    frames: Option<Shared<Frame>>,
     handler: Option<(Rc<Mark>, State)>,
 }
 
@@ -98,7 +102,7 @@ pub(crate) fn run(start: Node) -> Result<Val, (Val, Pieces)> {
     loop {
         c = match c {
             Node::Bind(mut bind) => {
-                let frame = Rc::get_mut(&mut bind).expect("a computation is run once");
+                let frame = &mut bind.get_mut().expect("a computation is run once").head;
                 let first = frame.first.take().expect("a computation is run once");
                 frame.rest = top.frames.take();
                 top.frames = Some(bind);
@@ -107,9 +111,9 @@ pub(crate) fn run(start: Node) -> Result<Val, (Val, Pieces)> {
             Node::Done(x) => match top.frames.take() {
                 Some(mut frame) => {
                     // a frame held by no continuation is unlinked, not counted
-                    top.frames = match Rc::get_mut(&mut frame) {
-                        Some(alone) => alone.rest.take(),
-                        None => frame.rest.clone(),
+                    top.frames = match frame.get_mut() {
+                        Some(alone) => alone.head.rest.take(),
+                        None => frame.head.rest.clone(),
                     };
                     (frame.next)(x)
                 }
@@ -133,7 +137,7 @@ pub(crate) fn run(start: Node) -> Result<Val, (Val, Pieces)> {
                 };
                 let Some(at) = found else {
                     under.push(top);
-                    return Err((op, under.into()));
+                    return Err((op, Shared::from_exact(under.len(), under.into_iter())));
                 };
                 let level = if at == under.len() { &mut top } else { &mut under[at] };
                 let (mark, state) = level.handler.as_mut().expect("the level found has a handler");
@@ -141,7 +145,8 @@ pub(crate) fn run(start: Node) -> Result<Val, (Val, Pieces)> {
                     Clause::InPlace(answer) => Node::Done(answer(state, op)),
                     Clause::General(on) => {
                         let on = on.clone();
-                        let k = under.drain(at..).chain(once(take(&mut top))).collect();
+                        let levels = under.len() - at + 1;
+                        let k = Shared::from_exact(levels, under.drain(at..).chain(once(take(&mut top))));
                         top = under.pop().unwrap_or_default();
                         on(op, k)
                     }
@@ -169,24 +174,35 @@ pub(crate) fn run(start: Node) -> Result<Val, (Val, Pieces)> {
 // Rust has no collector: a chain of a million binds, or of a million frames, would be dropped by recursion a
 // million deep. So a chain is dropped in a loop — each link is emptied before it is let go.
 
-impl<F: ?Sized> Drop for Frame<F> {
+impl Drop for Waits {
+    #[inline]
     fn drop(&mut self) {
-        let mut alone = Vec::new();
-        self.unlink(&mut alone);
-        while let Some(mut frame) = alone.pop() {
-            Rc::get_mut(&mut frame).expect("held by nobody else").unlink(&mut alone);
+        // a frame that gave its value holds nothing: most do
+        if self.first.is_some() || self.rest.is_some() {
+            self.drop_chains()
         }
     }
 }
 
-impl<F: ?Sized> Frame<F> {
-    /// the frames that only this one holds, taken out of it
-    fn unlink(&mut self, alone: &mut Vec<Rc<Frame>>) {
-        if let Some(Node::Bind(first)) = self.first.take_if(|first| matches!(first, Node::Bind(_))) {
-            alone.push(first);
+impl Waits {
+    fn drop_chains(&mut self) {
+        // a chain is followed link by link; `more` takes memory only where a frame holds two chains
+        let mut more = Vec::new();
+        let mut next = self.unlink(&mut more);
+        while let Some(mut frame) = next.or_else(|| more.pop()) {
+            next = frame.get_mut().expect("held by nobody else").head.unlink(&mut more);
         }
-        if let Some(rest) = self.rest.take_if(|rest| Rc::strong_count(rest) == 1) {
-            alone.push(rest);
+    }
+
+    /// the frames that only this one holds, taken out of it: one is given, a second is put in `more`
+    fn unlink(&mut self, more: &mut Vec<Shared<Frame>>) -> Option<Shared<Frame>> {
+        let rest = self.rest.take_if(|rest| rest.alone());
+        match self.first.take_if(|first| matches!(first, Node::Bind(_))) {
+            Some(Node::Bind(first)) => {
+                more.extend(rest);
+                Some(first)
+            }
+            _ => rest,
         }
     }
 }

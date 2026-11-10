@@ -108,6 +108,7 @@ use std::rc::Rc;
 pub mod effects;
 pub mod json;
 mod machine;
+mod pool;
 mod val;
 pub mod wire;
 
