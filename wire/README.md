@@ -272,8 +272,9 @@ Not protocol, but what the Scala host does, and what `expected.txt` shows:
   stream's message in the stream's queue, a credit on the input's count.
 - A far failure is raised in the host's program as `Throws[Condition]`; the program's handlers decide. The same
   for a far side that has gone (`WorkerDied`).
-- `Remote.run(program)` is a scope: when the program ends, every run it began is forgotten (`forget`) and every
-  stream still open is cancelled (`cancel`). Refs live until released.
+- `Remote.run(program)` is a scope: when the program ends, is left through an effect, or the host throws, every
+  run it began is forgotten (`forget`) and every stream still open is cancelled (`cancel`). Refs live until
+  released.
 - `Far.start` / `Far.result` send a call and wait for its answer separately: that is how a program has two
   calls in flight.
 

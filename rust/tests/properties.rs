@@ -16,6 +16,11 @@ fn count(n: i64) -> Comp<i64, Counter> {
     State::get().flat_map(|s: i64| State::put(s + 1)).then(move || count(n - 1)).boxed()
 }
 
+/// a count to `n`, its binds nested to the left
+fn nested(n: i64) -> Comp<i64, Counter> {
+    (0..n).fold(State::get().boxed(), |p, _| p.flat_map(|s: i64| State::put(s + 1).map(move |_| s + 1)).boxed())
+}
+
 #[test]
 fn a_row_handlers_take_their_effects_one_by_one_a_program_runs_when_none_is_left() {
     let p = State::get::<eff![State<i64>, Writer<String>, Throws<String>], _>().flat_map(|s: i64| {
@@ -44,11 +49,19 @@ fn constant_stack_a_million_operations() {
 }
 
 #[test]
+fn constant_stack_a_few_thousand_operations() {
+    assert_eq!(State::run(0, count(3_000)).run(), (3_000, 3_000));
+}
+
+#[test]
 #[cfg_attr(miri, ignore)]
 fn constant_stack_a_hundred_thousand_binds_nested_to_the_left() {
-    let p: Comp<i64, Counter> = (0..100_000)
-        .fold(State::get().boxed(), |p, _| p.flat_map(|s: i64| State::put(s + 1).map(move |_| s + 1)).boxed());
-    assert_eq!(State::run(0, p).run(), (100_000, 100_000));
+    assert_eq!(State::run(0, nested(100_000)).run(), (100_000, 100_000));
+}
+
+#[test]
+fn constant_stack_a_few_thousand_binds_nested_to_the_left() {
+    assert_eq!(State::run(0, nested(3_000)).run(), (3_000, 3_000));
 }
 
 fn even(n: u32) -> Comp<bool, ()> {
@@ -62,6 +75,12 @@ fn odd(n: u32) -> Comp<bool, ()> {
 #[cfg_attr(miri, ignore)]
 fn mutual_tail_recursion_without_end_a_million_calls() {
     assert!(even(1_000_000).run());
+}
+
+#[test]
+fn mutual_tail_recursion_a_few_thousand_calls() {
+    assert!(even(3_000).run());
+    assert!(!even(3_001).run());
 }
 
 #[test]
@@ -90,6 +109,12 @@ fn from(n: i64) -> Comp<Never, eff![Emit<i64>]> {
 fn an_endless_stream_pulled() {
     assert_eq!(Emit::pull(from(0)).take(3).collect::<Vec<_>>(), vec![0, 1, 2]);
     assert_eq!(Emit::pull(from(0)).nth(1_000_000), Some(1_000_000));
+}
+
+#[test]
+fn an_endless_stream_pulled_a_few_thousand_values() {
+    assert_eq!(Emit::pull(from(0)).take(3).collect::<Vec<_>>(), vec![0, 1, 2]);
+    assert_eq!(Emit::pull(from(0)).nth(3_000), Some(3_000));
 }
 
 #[test]
@@ -198,6 +223,14 @@ fn wait_for<A: 'static>(timers: &Timers, p: impl Prog<A, eff![Async]>) -> A {
     result.take().expect("the program came to its value")
 }
 
+/// `n` waits, each answered at once, and the answers summed
+fn answered(n: u32, so_far: u32) -> Comp<u32, eff![Async]> {
+    if n == 0 {
+        return pure(so_far).boxed();
+    }
+    Async::wait(|resume: Resume<u32>| resume(1)).flat_map(move |x| answered(n - 1, so_far + x)).boxed()
+}
+
 #[test]
 fn asynchrony_both_at_once_the_first_of_two_all_a_sleep() {
     let timers = Timers::new();
@@ -212,13 +245,12 @@ fn asynchrony_both_at_once_the_first_of_two_all_a_sleep() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn asynchrony_a_million_answers_given_at_once_take_no_stack() {
-    fn sum(n: u32, so_far: u32) -> Comp<u32, eff![Async]> {
-        if n == 0 {
-            return pure(so_far).boxed();
-        }
-        Async::wait(|resume: Resume<u32>| resume(1)).flat_map(move |x| sum(n - 1, so_far + x)).boxed()
-    }
-    assert_eq!(wait_for(&Timers::new(), sum(1_000_000, 0)), 1_000_000);
+    assert_eq!(wait_for(&Timers::new(), answered(1_000_000, 0)), 1_000_000);
+}
+
+#[test]
+fn asynchrony_a_few_thousand_answers_given_at_once_take_no_stack() {
+    assert_eq!(wait_for(&Timers::new(), answered(3_000, 0)), 3_000);
 }
 
 #[test]

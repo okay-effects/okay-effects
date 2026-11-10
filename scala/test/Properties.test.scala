@@ -603,6 +603,16 @@ class Properties extends munit.FunSuite:
     val kept = Handler.general[Account, Pure, Int, Int](pure)([X] => (_: Account[X], _: X => Int ! Pure) => pure(0))
     assertEquals(logged(run(handle(p, kept))), (0, Nil))
 
+  test("ensuring, a stream pulled and not read to its end: no finalizer runs; read to its end, it runs"):
+    def from(n: Int): Nothing ! Emit % Int = Emit.send(n).flatMap(_ => from(n + 1))
+    def three: Unit ! Emit % Int = Emit.sendAll(List(1, 2, 3)).ensuring(said("closed"))
+    // the sequence keeps the rest of the producer, and nobody leaves it
+    assertEquals(logged(Emit.pull(from(0).ensuring(said("closed"))).take(3).toList), (List(0, 1, 2), Nil))
+    assertEquals(logged(Emit.pull(three).take(2).toList), (List(1, 2), Nil))
+    // every value taken, the end not asked for: the producer still waits at its last value
+    assertEquals(logged(Emit.pull(three).take(3).toList), (List(1, 2, 3), Nil))
+    assertEquals(logged(Emit.pull(three).toList), (List(1, 2, 3), List("closed")))
+
   test("ensuring, asynchrony: a program that waits is kept, and its finalizer runs when it ends"):
     var waiting = List.empty[() => Unit]
     val p: Int ! Async = Async.await[Int](resume => waiting ::= (() => resume(1))).map(_ + 1).ensuring(said("closed"))

@@ -300,7 +300,7 @@ test.sh     everything
 ```
 
 `./test.sh` needs scala-cli, a JDK 25 or newer and cargo, and takes about a minute. It runs the three test suites
-(Scala 104 tests; Java 50 properties, 26 wire tests and 6 programs refused by javac; Rust 100 tests,
+(Scala 105 tests; Java 52 properties, 26 wire tests and 6 programs refused by javac; Rust 105 tests,
 compile-fail doctests among them), every worker against the 6 transcripts, and the nine host–worker pairs.
 
 ```
@@ -362,12 +362,11 @@ cd rust && cargo run --release --example bench
 - **Rust**: a computation is run once; everything is of one thread; the `unsafe` code of `val.rs`, `pool.rs` and
   `erased.rs` has its argument in comments. Under Miri (nightly, `-Zmiri-disable-isolation`) the three modules'
   own tests, the TCK and the properties pass. Nine properties are skipped there (`#[cfg_attr(miri, ignore)]`):
-  the loops of a hundred thousand and a million steps, and the endless stream. Four of the nine have a twin of a
-  few thousand steps that runs there: the chain of binds and frames dropped, and — in one test — the finalizers in
-  a loop, the waiting finalizers unwound, and the finalizers never run and dropped. The other five have none: the
-  million operations, the binds nested to the left, the mutual tail calls, the endless stream, the million
-  answers given at once. The wire's tests are not part of this: its CBOR tests pass under Miri, the
-  rest were not run there.
+  the loops of a hundred thousand and a million steps, and the endless stream. Each of the nine has a twin of a
+  few thousand steps that runs there: the operations, the binds nested to the left, the mutual tail calls, the
+  endless stream, the answers given at once, the chain of binds and frames dropped, and — in one test — the
+  finalizers in a loop, the waiting finalizers unwound, and the finalizers never run and dropped. The wire's
+  tests are not part of this: its CBOR tests pass under Miri, the rest were not run there.
 - **A finalizer runs only when the machine leaves its program.** Not when the host throws or panics out of the
   run; not for a `k` that a clause neither resumes nor unwinds (in Rust: drops); not for a stream pulled
   (`Emit.pull`, `zip`, `merge`) and not read to its end — `take` under the `pull` cuts it first. A `k` unwound twice

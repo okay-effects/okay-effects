@@ -303,16 +303,17 @@ final class Properties {
   }
 
   /** an interceptor at the state's place in the row ({@code handle(.., under(p))}) that leaves at a put: the rest
-   * is unwound, keeping the effect in the row ({@code K.unwindKeeping}); then the state outside is read */
+   * is unwound, keeping the effect in the row ({@code K.unwindKeeping}) or not ({@code k.unwind()}); then the
+   * state outside is read */
   static <T> Comp<Integer, Eff<State<Integer>, T>> leaving(
-      List<String> seen, Comp<Integer, ? super Eff<State<Integer>, T>> p) {
+      boolean keeping, List<String> seen, Comp<Integer, ? super Eff<State<Integer>, T>> p) {
     return handle(State.class, new Handler<State<Integer>, Integer, Integer, Eff<State<Integer>, T>>() {
       public Comp<Integer, Eff<State<Integer>, T>> ret(Integer a) { return pure(a); }
       public Comp<Integer, Eff<State<Integer>, T>> on(State<Integer> op, K<Integer, Eff<State<Integer>, T>> k) {
         seen.add(op.toString());
         return switch (op) {
-          case State.Put<Integer> put ->
-              K.unwindKeeping(k, put).then(() -> State.<Integer>get().map(s -> s + 100));
+          case State.Put<Integer> put -> (keeping ? K.unwindKeeping(k, put) : k.unwind())
+              .then(() -> State.<Integer>get().map(s -> s + 100));
           case State.Get<Integer> get -> perform(get).flatMap(s -> k.resume(get, s));
         };
       }
@@ -636,6 +637,19 @@ final class Properties {
     test("ensuring, `k` neither resumed nor unwound: nothing of it runs", () ->
         same(told(() -> run(account((deposit, k) -> pure(0), deposited()))), new Pair<>(0, List.of())));
 
+    test("ensuring, a stream pulled and not read to its end: no finalizer runs; read to its end, it runs", () -> {
+      // the iterator keeps the rest of the producer, and nobody leaves it
+      same(told(() -> first(3, Emit.pull(from(0).ensuring(() -> said("closed"))))),
+          new Pair<>(List.of(0, 1, 2), List.of()));
+      same(told(() -> first(2, Emit.pull(three().ensuring(() -> said("closed"))))),
+          new Pair<>(List.of(1, 2), List.of()));
+      // every value taken, the end not asked for: the producer still waits at its last value
+      same(told(() -> first(3, Emit.pull(three().ensuring(() -> said("closed"))))),
+          new Pair<>(List.of(1, 2, 3), List.of()));
+      same(told(() -> first(9, Emit.pull(three().ensuring(() -> said("closed"))))),
+          new Pair<>(List.of(1, 2, 3), List.of("closed")));
+    });
+
     test("ensuring, asynchrony: a program that waits is kept, and its finalizer runs when it ends", () -> {
       ArrayDeque<Runnable> waiting = new ArrayDeque<>();
       List<Integer> result = new ArrayList<>();
@@ -698,7 +712,8 @@ final class Properties {
           Comp<Integer, Eff<State<Integer>, ?>> p =
               body.ensuring(() -> State.<Integer>get().flatMap(s -> State.put(s + 9)));
           // the finalizer read the 5 outside and wrote 14 there: the put of 1 never passed the interceptor
-          same(told(() -> run(State.run(5, leaving(seen, p)))), new Pair<>(new State.Final<>(14, 114), List.of()));
+          same(told(() -> run(State.run(5, leaving(true, seen, p)))),
+              new Pair<>(new State.Final<>(14, 114), List.of()));
           // the interceptor has left: it saw the put it left at, and nothing of the finalizer
           same(seen, List.of("Put[value=1]"));
           // by the class, of an effect with no type arguments: `k.unwind()` leaves nothing where the interceptor
@@ -708,6 +723,26 @@ final class Properties {
               .ensuring(() -> Fresh.fresh().flatMap(n -> said("fresh " + n)));
           same(told(() -> run(Fresh.run(leavingFresh(numbers, asking)))), new Pair<>(101L, List.of("fresh 0")));
           same(numbers, List.of("Next[]"));
+        });
+
+    test("ensuring, an interceptor at a place that leaves with plain `k.unwind()`: it is gone, as under `handle`",
+        () -> {
+          Comp<Integer, Eff<State<Integer>, ?>> body = State.put(1).then(() -> said("not run").map(done -> 0));
+          Supplier<Comp<Void, Eff<State<Integer>, ?>>> closing = () ->
+              Properties.<Eff<State<Integer>, ?>>said("closing").then(() -> State.<Integer>get())
+                  .flatMap(s -> said("read " + s).then(() -> State.put(s + 9))).ensuring(() -> said("inner"));
+          Comp<Integer, Eff<State<Integer>, ?>> p = body.ensuring(closing).ensuring(() -> said("outer"));
+          // nobody answers the finalizer's get: it ends there, through its own finalizer, and the unwinding goes
+          // on. The state outside is not written; the interceptor, after the unwinding, reads it
+          List<String> seen = new ArrayList<>();
+          same(told(() -> run(State.run(5, leaving(false, seen, p)))),
+              new Pair<>(new State.Final<>(5, 105), List.of("closing", "inner", "outer")));
+          same(seen, List.of("Put[value=1]"));
+          // the same program, left with `K.unwindKeeping`: the get is answered outside, and the finalizer ends
+          List<String> kept = new ArrayList<>();
+          same(told(() -> run(State.run(5, leaving(true, kept, p)))),
+              new Pair<>(new State.Final<>(14, 114), List.of("closing", "read 5", "inner", "outer")));
+          same(kept, List.of("Put[value=1]"));
         });
 
     test("ensuring, a finalizer stopped at an operation of the handler that left: its own finalizer still runs",
