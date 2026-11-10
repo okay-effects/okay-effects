@@ -70,7 +70,7 @@ impl<A: 'static> Kont<A> for Ret {
 }
 
 /// A computation, as the machine sees it: something started with what follows it. The kernel's structs are the
-/// only ones (lib.rs); the surface names them by `Comp<R, A>`.
+/// only ones (lib.rs); the surface names them by `Program<A, R>`.
 pub trait Start: Sized + 'static {
     /// the effects it may ask
     type Row: 'static;

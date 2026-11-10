@@ -82,10 +82,10 @@ enum Fail {
     Raise(i32, i32, Reply<i32>),
 }
 
-type Program = Dyn<row![Log, Cell, Fail, Choose], i32>;
+type Tested = Comp<i32, eff![Log, Cell, Fail, Choose]>;
 
-fn writer(e: i32, p: Program) -> Program {
-    let on = |op, k: K<_, (i32, i32)>| match op {
+fn writer(e: i32, p: Tested) -> Tested {
+    let on = |op, k: K<(i32, i32), _>| match op {
         Log::Tell(_, n, r) => k.resume(r, ()).map(move |(sum, a)| (sum.wrapping_add(n), a)),
     };
     Handler::new(|a| pure((0, a)), on)
@@ -97,7 +97,7 @@ fn writer(e: i32, p: Program) -> Program {
 
 /// the TCK's state is a cell made where the handler is installed: one for every resumption taken past it —
 /// not the state of `effects::State`, which each path has its own
-fn state(e: i32, s0: i32, p: Program) -> Program {
+fn state(e: i32, s0: i32, p: Tested) -> Tested {
     let s = Rc::new(cell::Cell::new(s0));
     let at_end = s.clone();
     let answer = move |_: &mut (), op| match op {
@@ -113,14 +113,14 @@ fn state(e: i32, s0: i32, p: Program) -> Program {
         .boxed()
 }
 
-fn throws(e: i32, p: Program) -> Program {
+fn throws(e: i32, p: Tested) -> Tested {
     let on = |op, _| match op {
         Fail::Raise(_, n, _) => pure(-1 - n),
     };
     Handler::new(pure, on).mine(move |op| matches!(op, Fail::Raise(id, _, _) if *id == e)).intercept(p).boxed()
 }
 
-fn build(t: &Rc<T>) -> Program {
+fn build(t: &Rc<T>) -> Tested {
     match &**t {
         T::Pure(n) => pure(*n).boxed(),
         T::Tell(e, n) => { let (e, n) = (*e, *n); perform(move |r| Log::Tell(e, n, r)).map(move |_: ()| n).boxed() }

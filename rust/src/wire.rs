@@ -11,7 +11,7 @@
 //!   remote      the host's side: a far side as an effect
 
 use crate::json::Json;
-use crate::{Comp, Has, Reply, perform};
+use crate::{Has, Program, Reply, perform};
 
 pub mod auth;
 pub mod cbor;
@@ -30,7 +30,7 @@ pub enum Foreign {
     Call(String, Vec<Json>, Reply<Json>),
 }
 
-pub fn call<R: Has<Foreign, I>, I>(name: &str, args: Vec<Json>) -> impl Comp<R, Json> + use<R, I> {
+pub fn call<R: Has<Foreign, I>, I>(name: &str, args: Vec<Json>) -> impl Program<Json, R> + use<R, I> {
     perform(|r| Foreign::Call(name.to_string(), args, r))
 }
 

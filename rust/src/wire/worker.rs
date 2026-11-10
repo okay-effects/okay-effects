@@ -18,7 +18,7 @@ use crate::effects::{Async, Emit, Resume, Throws};
 use crate::json::{Json, Ref};
 use crate::wire::escapes::{dec, enc, items};
 use crate::wire::{Condition, Foreign, Link, SHIM, auth};
-use crate::{Asked, Comp, Dyn, Handler, Has, K, Reply, Resumed, Step, perform, pure, row};
+use crate::{Asked, Comp, Handler, Has, K, Program, Reply, Resumed, Step, eff, perform, pure};
 
 /// THE STREAM A CALLER FEEDS into a function of the far side: the function takes a value at a time.
 pub enum Fed {
@@ -27,15 +27,15 @@ pub enum Fed {
 
 impl Fed {
     /// The caller's next value, waited for; none at the stream's end.
-    pub fn next<R: Has<Self, I>, I>() -> impl Comp<R, Option<Json>> {
+    pub fn next<R: Has<Self, I>, I>() -> impl Program<Option<Json>, R> {
         perform(Fed::Next)
     }
 }
 
 /// what a function of a module may ask
-pub type Row = row![Foreign, Emit<Json>, Fed, Async, Throws<Condition>];
+pub type Row = eff![Foreign, Emit<Json>, Fed, Async, Throws<Condition>];
 /// a function of a module: the program of a call, its type forgotten
-pub type Function = Box<dyn Fn(&[Json]) -> Dyn<Row, Json>>;
+pub type Function = Box<dyn Fn(&[Json]) -> Comp<Json, Row>>;
 
 /// An object kept for the host: its methods and attributes, by name; none for a name it has not.
 pub trait Thing {
@@ -86,16 +86,16 @@ pub fn serve(module: Module, input: impl Read + 'static, output: impl Write + 's
 // gives the wait out as the program's value; the other four are met by stepping.
 
 /// what a function asks the worker, a step at a time
-type Asks = row![Foreign, Emit<Json>, Fed, Throws<Condition>];
+type Asks = eff![Foreign, Emit<Json>, Fed, Throws<Condition>];
 
 /// Where a function came to, when it asks nothing: its value, or a wait — to be given what goes on with the rest.
 enum Came {
     Value(Json),
-    Waits(Box<dyn FnOnce(Resume<Resumed<Asks, Came>>)>),
+    Waits(Box<dyn FnOnce(Resume<Resumed<Came, Asks>>)>),
 }
 
-fn stepped(p: Dyn<Row, Json>) -> Step<Asks, Came> {
-    let on = |op, k: K<Asks, Came>| match op {
+fn stepped(p: Comp<Json, Row>) -> Step<Came, Asks> {
+    let on = |op, k: K<Came, Asks>| match op {
         Async::Await(register, r) => {
             pure(Came::Waits(Box::new(move |go| register(Rc::new(move |x| go(k.resume(r, x)))))))
         }
@@ -104,7 +104,7 @@ fn stepped(p: Dyn<Row, Json>) -> Step<Asks, Came> {
 }
 
 /// a function stopped at an operation it waits to be answered, and what it answers to
-type Parked = RefCell<Option<(Task, Asked<Asks, Came>)>>;
+type Parked = RefCell<Option<(Task, Asked<Came, Asks>)>>;
 
 /// a stream the host feeds: the values come and not yet taken; its function waits for one
 struct In {
@@ -165,7 +165,7 @@ struct Worker {
     proven: Cell<bool>,
     closing: Cell<bool>,
     /// the programs stopped at a call, by run and `k`
-    kept: RefCell<HashMap<(i64, i64), Asked<Asks, Came>>>,
+    kept: RefCell<HashMap<(i64, i64), Asked<Came, Asks>>>,
     counter: Cell<i64>,
     held: RefCell<HashMap<i64, Held>>,
     refs: Cell<i64>,
@@ -382,7 +382,7 @@ impl Worker {
     }
 
     /// a call as a stream: answered at once, its chunks follow as the host gives credit
-    fn open(self: &Rc<Self>, id: &Json, stream: i64, request: &Json, p: Dyn<Row, Json>) {
+    fn open(self: &Rc<Self>, id: &Json, stream: i64, request: &Json, p: Comp<Json, Row>) {
         let input = match request.get("input").get("id") {
             Json::Int(fed) => Some(Rc::new(In {
                 id: *fed,
@@ -464,7 +464,7 @@ impl Worker {
     // -- a function, run
 
     /// the task's program run until it ends or waits: for the host's answer, a credit, a value, a callback
-    fn advance(self: &Rc<Self>, task: &Task, mut at: Step<Asks, Came>) {
+    fn advance(self: &Rc<Self>, task: &Task, mut at: Step<Came, Asks>) {
         loop {
             match self.turn(task, at) {
                 Ok(Some(rest)) => at = rest.step(),
@@ -475,7 +475,7 @@ impl Worker {
     }
 
     /// where the program came to: what goes to the host, and the rest of the program when it need not wait
-    fn turn(self: &Rc<Self>, task: &Task, at: Step<Asks, Came>) -> Result<Option<Resumed<Asks, Came>>, Condition> {
+    fn turn(self: &Rc<Self>, task: &Task, at: Step<Came, Asks>) -> Result<Option<Resumed<Came, Asks>>, Condition> {
         if matches!(task, Task::Stream(out) if !out.open.get()) {
             return Ok(None);
         }
@@ -483,7 +483,7 @@ impl Worker {
             Step::Asked(asked) => asked,
             Step::Done(Came::Waits(wait)) => {
                 let (worker, task) = (Rc::downgrade(self), task.clone());
-                wait(Rc::new(move |rest: Resumed<Asks, Came>| {
+                wait(Rc::new(move |rest: Resumed<Came, Asks>| {
                     if let Some(worker) = worker.upgrade() {
                         worker.advance(&task, rest.step())
                     }

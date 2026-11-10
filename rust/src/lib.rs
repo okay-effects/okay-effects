@@ -2,14 +2,14 @@
 //! it. The same model as the Scala and the Java kernels beside this one; the same programs come to the same answers.
 //!
 //! An effect is one enum; each operation is a variant that carries a `Reply<X>`, the witness of what answers it.
-//! A handler is one closure with a `match` over the enum. A computation `impl Comp<R, A>` carries the ROW `R` of
+//! A handler is one closure with a `match` over the enum. A computation `impl Program<A, R>` carries the ROW `R` of
 //! the effects it may ask, a list of types: a handler takes its effect out of the row, and only a program with the
 //! empty row has `run`. So rustc refuses an effect left without a handler, a handler that misses an operation,
 //! and an answer of the wrong type.
 //!
 //! ```
 //! use okay_effects::effects::Choose;
-//! use okay_effects::{Comp, Handler, Has, Reply, perform, pure, row};
+//! use okay_effects::{Handler, Has, Program, Reply, eff, perform, pure};
 //!
 //! // an effect: its operations, each with what answers it
 //! enum Account {
@@ -17,21 +17,21 @@
 //!     Balance(Reply<i64>),
 //! }
 //!
-//! fn deposit<R: Has<Account, I>, I>(amount: i64) -> impl Comp<R, ()> {
+//! fn deposit<R: Has<Account, I>, I>(amount: i64) -> impl Program<(), R> {
 //!     perform(|r| Account::Deposit(amount, r))
 //! }
 //!
-//! fn balance<R: Has<Account, I>, I>() -> impl Comp<R, i64> {
+//! fn balance<R: Has<Account, I>, I>() -> impl Program<i64, R> {
 //!     perform(Account::Balance)
 //! }
 //!
 //! // a program of two effects
-//! fn program() -> impl Comp<row![Account, Choose], i64> {
+//! fn program() -> impl Program<i64, eff![Account, Choose]> {
 //!     Choose::among(vec![1, 2]).flat_map(|x| deposit(x * 10)).then(|| balance())
 //! }
 //!
 //! // a handler: every operation answered in place, from a balance it keeps
-//! fn bank<A: 'static>(start: i64, p: impl Comp<row![Account, Choose], A>) -> impl Comp<row![Choose], A> {
+//! fn bank<A: 'static>(start: i64, p: impl Program<A, eff![Account, Choose]>) -> impl Program<A, eff![Choose]> {
 //!     let answer = |balance: &mut i64, op| match op {
 //!         Account::Deposit(amount, r) => {
 //!             *balance += amount;
@@ -50,23 +50,23 @@
 //!
 //! A program is composed STATICALLY: `flat_map`, `map`, `then`, `perform`, `handle` each return a struct that holds
 //! its parts — nothing is allocated, and rustc compiles a chain of them into straight-line code. So the type of a
-//! program is its shape, and it is not written: a function returns `impl Comp<R, A>`.
+//! program is its shape, and it is not written: a function returns `impl Program<A, R>`.
 //!
-//! The type is forgotten only where you say so, with `.boxed()`, which gives a `Dyn<R, A>` — a computation of any
+//! The type is forgotten only where you say so, with `.boxed()`, which gives a `Comp<A, R>` — a computation of any
 //! shape, kept in place when it is small and in a box when it is not, and started by the machine's loop (so a
 //! call in tail position takes no stack). You need it in three places, where rustc asks for one type:
 //!
-//!   * RECURSION. A function that calls itself, however far away, returns `Dyn<R, A>`: its shape would hold
+//!   * RECURSION. A function that calls itself, however far away, returns `Comp<A, R>`: its shape would hold
 //!     itself. Every loop of a program is such a function.
 //!   * BRANCHES of different shapes: each arm of the `if` or the `match` ends with `.boxed()`.
-//!   * A PROGRAM KEPT AS A VALUE — in a field, a `Vec`, behind a `dyn Fn`: its type is `Dyn<R, A>`.
+//!   * A PROGRAM KEPT AS A VALUE — in a field, a `Vec`, behind a `dyn Fn`: its type is `Comp<A, R>`.
 //!
 //! ```
 //! use okay_effects::effects::{State, Throws};
-//! use okay_effects::{Comp, Dyn, pure, row};
+//! use okay_effects::{Comp, Program, eff, pure};
 //!
 //! // counts down to nothing, or fails: a loop, and two shapes of its end
-//! fn down(n: i64) -> Dyn<row![State<i64>, Throws<String>], i64> {
+//! fn down(n: i64) -> Comp<i64, eff![State<i64>, Throws<String>]> {
 //!     if n < 0 {
 //!         return Throws::raise("below nothing".to_string()).boxed();
 //!     }
@@ -78,10 +78,10 @@
 //!
 //! assert_eq!(Throws::run(State::run(0, down(1000))).run(), Ok((1000, 1000)));
 //! assert_eq!(State::run(0, Throws::run(down(-1))).run(), (0, Err("below nothing".to_string())));
-//! assert_eq!(pure::<(), _>(1).map(|x| x + 1).run(), 2);
+//! assert_eq!(pure::<_, ()>(1).map(|x| x + 1).run(), 2);
 //! ```
 //!
-//! A function that is given a reference and returns `impl Comp<R, A>` says so with `+ use<R, I>` (its type
+//! A function that is given a reference and returns `impl Program<A, R>` says so with `+ use<R, I>` (its type
 //! parameters): without it rustc takes the program to hold the reference.
 //!
 //! A closure given to `flat_map`, `map`, `then` or `defer` is `FnOnce + Clone + 'static`. It is called once — it
@@ -90,7 +90,7 @@
 //! closure holds must be `Clone`, and is best cheap to copy: keep a big value in an `Rc`. A program resumed once
 //! copies nothing. The closures of a handler (`Handler::new`, `Handler::in_place`) are plain `Fn`.
 //!
-//! A program built at run time — by a fold, from a tree, by name — is built of `Dyn`s, each step `.boxed()`:
+//! A program built at run time — by a fold, from a tree, by name — is built of `Comp`s, each step `.boxed()`:
 //! slower than straight-line code, with a frame on the heap wherever a value is waited for, and as safe for the
 //! stack.
 //!
@@ -100,9 +100,9 @@
 //!
 //! ```compile_fail,E0277
 //! use okay_effects::effects::{Choose, State};
-//! use okay_effects::{Comp, Dyn, row};
+//! use okay_effects::{Comp, Program, eff};
 //!
-//! let p: Dyn<row![State<i64>, Choose], i64> = State::get().boxed();
+//! let p: Comp<i64, eff![State<i64>, Choose]> = State::get().boxed();
 //! State::run(0, p).run(); // `Choose` is not handled
 //! ```
 //!
@@ -110,20 +110,20 @@
 //!
 //! ```compile_fail,E0277
 //! use okay_effects::effects::{Choose, State};
-//! use okay_effects::{Comp, Dyn, row};
+//! use okay_effects::{Comp, Program, eff};
 //!
-//! let p: Dyn<row![Choose], i64> = State::get().boxed();
+//! let p: Comp<i64, eff![Choose]> = State::get().boxed();
 //! ```
 //!
 //! A handler that misses an operation: the `match` is not exhaustive.
 //!
 //! ```compile_fail,E0004
-//! # use okay_effects::{Comp, Handler, Reply, pure, row};
+//! # use okay_effects::{Handler, Program, Reply, eff, pure};
 //! # enum Account {
 //! #     Deposit(i64, Reply<()>),
 //! #     Balance(Reply<i64>),
 //! # }
-//! fn bank(p: impl Comp<row![Account], i64>) -> impl Comp<row![], i64> {
+//! fn bank(p: impl Program<i64, eff![Account]>) -> impl Program<i64, eff![]> {
 //!     let answer = |balance: &mut i64, op| match op {
 //!         Account::Balance(r) => r.give(*balance),
 //!     };
@@ -134,12 +134,12 @@
 //! An answer of the wrong type: a `Reply<i64>` gives only an `i64`.
 //!
 //! ```compile_fail,E0308
-//! # use okay_effects::{Comp, Handler, Reply, pure, row};
+//! # use okay_effects::{Handler, Program, Reply, eff, pure};
 //! # enum Account {
 //! #     Deposit(i64, Reply<()>),
 //! #     Balance(Reply<i64>),
 //! # }
-//! fn bank(p: impl Comp<row![Account], i64>) -> impl Comp<row![], i64> {
+//! fn bank(p: impl Program<i64, eff![Account]>) -> impl Program<i64, eff![]> {
 //!     let answer = |balance: &mut i64, op| match op {
 //!         Account::Deposit(amount, r) => {
 //!             *balance += amount;
@@ -203,21 +203,21 @@ pub trait Closed {}
 
 impl Closed for () {}
 
-/// A row, written as a list: `row![State<i64>, Choose]` is `(State<i64>, (Choose, ()))`.
+/// A row, written as a list: `eff![State<i64>, Choose]` is `(State<i64>, (Choose, ()))`.
 #[macro_export]
-macro_rules! row {
+macro_rules! eff {
     () => { () };
-    ($effect:ty $(, $rest:ty)* $(,)?) => { ($effect, $crate::row![$($rest),*]) };
+    ($effect:ty $(, $rest:ty)* $(,)?) => { ($effect, $crate::eff![$($rest),*]) };
 }
 
 // -- A COMPUTATION
 
 /// A computation of an `A` that may ask the operations of the row `R`. Only data: nothing runs until `step`.
 /// It is run once: what is asked for many times is built by a function. Every computation is one of the kernel's
-/// structs — `Pure`, `Ask`, `Bind`..., and `Dyn`, the one whose type is forgotten; a function says
-/// `impl Comp<R, A>` and need not name them.
-pub trait Comp<R: 'static, A: 'static>: Start<Row = R, Out = A> {
-    fn flat_map<B: 'static, D: Comp<R, B>, F: FnOnce(A) -> D + Clone + 'static>(self, f: F) -> Bind<Self, F> {
+/// structs — `Pure`, `Ask`, `Bind`..., and `Comp`, the one whose type is forgotten; a function says
+/// `impl Program<A, R>` and need not name them.
+pub trait Program<A: 'static, R: 'static>: Start<Row = R, Out = A> {
+    fn flat_map<B: 'static, D: Program<B, R>, F: FnOnce(A) -> D + Clone + 'static>(self, f: F) -> Bind<Self, F> {
         Bind { c: self, f }
     }
 
@@ -226,13 +226,13 @@ pub trait Comp<R: 'static, A: 'static>: Start<Row = R, Out = A> {
     }
 
     /// The computation after this one, whose value is not needed.
-    fn then<B: 'static, D: Comp<R, B>, F: FnOnce() -> D + Clone + 'static>(self, next: F) -> Then<Self, F> {
+    fn then<B: 'static, D: Program<B, R>, F: FnOnce() -> D + Clone + 'static>(self, next: F) -> Then<Self, F> {
         Then { c: self, f: next }
     }
 
     /// THE BOUNDARY: the computation with its type forgotten — kept in place if it is small, in a box if not.
-    fn boxed(self) -> Dyn<R, A> {
-        Dyn { erased: self.erase(), of: PhantomData }
+    fn boxed(self) -> Comp<A, R> {
+        Comp { erased: self.erase(), of: PhantomData }
     }
 
     /// The same computation in a bigger row, where rustc does not see by itself that it fits.
@@ -246,7 +246,7 @@ pub trait Comp<R: 'static, A: 'static>: Start<Row = R, Out = A> {
     }
 
     /// Where the computation comes to: its value, or an operation that no handler in it answers and the rest.
-    fn step(self) -> Step<R, A> {
+    fn step(self) -> Step<A, R> {
         match machine::run(|m| self.start(Ret, m)) {
             Ok(x) => Step::Done(x.take()),
             Err((op, k)) => Step::Asked(Asked { op, k: K { k, of: PhantomData } }),
@@ -265,16 +265,16 @@ pub trait Comp<R: 'static, A: 'static>: Start<Row = R, Out = A> {
     }
 }
 
-impl<C: Start> Comp<C::Row, C::Out> for C {}
+impl<C: Start> Program<C::Out, C::Row> for C {}
 
 /// A computation whose type is forgotten: what a function that calls itself returns, what branches of different
 /// shapes come to, what is kept as a value. Made by `.boxed()`.
-pub struct Dyn<R, A> {
+pub struct Comp<A, R> {
     erased: Erased,
-    of: PhantomData<fn() -> (R, A)>,
+    of: PhantomData<fn() -> (A, R)>,
 }
 
-impl<R: 'static, A: 'static> Start for Dyn<R, A> {
+impl<A: 'static, R: 'static> Start for Comp<A, R> {
     type Row = R;
     type Out = A;
 
@@ -290,16 +290,16 @@ impl<R: 'static, A: 'static> Start for Dyn<R, A> {
 }
 
 /// A value.
-pub struct Pure<R, A> {
+pub struct Pure<A, R> {
     a: A,
     of: PhantomData<fn() -> R>,
 }
 
-pub fn pure<R: 'static, A: 'static>(a: A) -> Pure<R, A> {
+pub fn pure<A: 'static, R: 'static>(a: A) -> Pure<A, R> {
     Pure { a, of: PhantomData }
 }
 
-impl<R: 'static, A: 'static> Start for Pure<R, A> {
+impl<A: 'static, R: 'static> Start for Pure<A, R> {
     type Row = R;
     type Out = A;
 
@@ -397,7 +397,7 @@ impl<A, D: Start, F: FnOnce() -> D + Clone + 'static, K: Kont<D::Out>> Kont<A> f
 }
 
 /// A computation built when it is reached: a call in tail position takes no stack.
-pub fn defer<R: 'static, A: 'static, D: Comp<R, A>>(p: impl FnOnce() -> D + Clone + 'static) -> Dyn<R, A> {
+pub fn defer<A: 'static, R: 'static, D: Program<A, R>>(p: impl FnOnce() -> D + Clone + 'static) -> Comp<A, R> {
     pure(()).then(p).boxed()
 }
 
@@ -442,17 +442,17 @@ impl<X: 'static> Reply<X> {
 pub enum Never {}
 
 /// An operation of the effect `E`, answered by an `X`.
-pub struct Ask<R, E, X> {
+pub struct Ask<E, X, R> {
     op: E,
-    of: PhantomData<fn() -> (R, X)>,
+    of: PhantomData<fn() -> (X, R)>,
 }
 
 /// An operation of the effect `E`, asked: `perform(State::Get)`, `perform(|r| State::Put(s, r))`.
-pub fn perform<E: 'static, X: 'static, R: Has<E, I>, I>(operation: impl FnOnce(Reply<X>) -> E) -> Ask<R, E, X> {
+pub fn perform<E: 'static, X: 'static, R: Has<E, I>, I>(operation: impl FnOnce(Reply<X>) -> E) -> Ask<E, X, R> {
     Ask { op: operation(Reply(PhantomData)), of: PhantomData }
 }
 
-impl<R: 'static, E: 'static, X: 'static> Start for Ask<R, E, X> {
+impl<E: 'static, X: 'static, R: 'static> Start for Ask<E, X, R> {
     type Row = R;
     type Out = X;
 
@@ -470,18 +470,18 @@ impl<R: 'static, E: 'static, X: 'static> Start for Ask<R, E, X> {
     }
 }
 
-pub enum Step<R, A> {
+pub enum Step<A, R> {
     Done(A),
-    Asked(Asked<R, A>),
+    Asked(Asked<A, R>),
 }
 
 /// An operation asked by a program of an `A`, and the rest of the program.
-pub struct Asked<R, A> {
+pub struct Asked<A, R> {
     op: Val,
-    k: K<R, A>,
+    k: K<A, R>,
 }
 
-impl<R: 'static, A: 'static> Asked<R, A> {
+impl<A: 'static, R: 'static> Asked<A, R> {
     /// The operation, if it is of the effect `E`.
     pub fn op<E: 'static, I>(&self) -> Option<&E>
     where
@@ -491,7 +491,7 @@ impl<R: 'static, A: 'static> Asked<R, A> {
     }
 
     /// The rest resumed with the answer.
-    pub fn resume<X: 'static>(&self, reply: Reply<X>, x: X) -> Resumed<R, A> {
+    pub fn resume<X: 'static>(&self, reply: Reply<X>, x: X) -> Resumed<A, R> {
         self.k.resume(reply, x)
     }
 }
@@ -500,25 +500,25 @@ impl<R: 'static, A: 'static> Asked<R, A> {
 
 /// The rest of a handled program, waiting for the answer of the operation it asked: a value, to resume once,
 /// many times, later, or never. It comes to a `B`, asking the row `R`.
-pub struct K<R, B> {
+pub struct K<B, R> {
     k: Pieces,
-    of: PhantomData<fn() -> (R, B)>,
+    of: PhantomData<fn() -> (B, R)>,
 }
 
-impl<R, B> Clone for K<R, B> {
+impl<B, R> Clone for K<B, R> {
     fn clone(&self) -> Self {
         K { k: self.k.clone(), of: PhantomData }
     }
 }
 
-impl<R: 'static, B: 'static> K<R, B> {
+impl<B: 'static, R: 'static> K<B, R> {
     /// The rest resumed with the answer; `reply` is the operation's own.
-    pub fn resume<X: 'static>(&self, _reply: Reply<X>, x: X) -> Resumed<R, B> {
+    pub fn resume<X: 'static>(&self, _reply: Reply<X>, x: X) -> Resumed<B, R> {
         Resumed { k: self.k.clone(), x: Val::new(x), of: PhantomData }
     }
 
     /// The operation asked again outside, the rest resumed with what is answered there: interception, audit.
-    pub fn pass<E: 'static, I>(&self, op: E) -> Passed<R, B>
+    pub fn pass<E: 'static, I>(&self, op: E) -> Passed<B, R>
     where
         R: Has<E, I>,
     {
@@ -527,13 +527,13 @@ impl<R: 'static, B: 'static> K<R, B> {
 }
 
 /// A continuation resumed with an answer.
-pub struct Resumed<R, B> {
+pub struct Resumed<B, R> {
     k: Pieces,
     x: Val,
-    of: PhantomData<fn() -> (R, B)>,
+    of: PhantomData<fn() -> (B, R)>,
 }
 
-impl<R: 'static, B: 'static> Start for Resumed<R, B> {
+impl<B: 'static, R: 'static> Start for Resumed<B, R> {
     type Row = R;
     type Out = B;
 
@@ -544,13 +544,13 @@ impl<R: 'static, B: 'static> Start for Resumed<R, B> {
 }
 
 /// An operation passed outside, its answer resuming a continuation.
-pub struct Passed<R, B> {
+pub struct Passed<B, R> {
     k: Pieces,
     op: Val,
-    of: PhantomData<fn() -> (R, B)>,
+    of: PhantomData<fn() -> (B, R)>,
 }
 
-impl<R: 'static, B: 'static> Start for Passed<R, B> {
+impl<B: 'static, R: 'static> Start for Passed<B, R> {
     type Row = R;
     type Out = B;
 
@@ -570,9 +570,9 @@ pub struct Handler<E, A, B, R> {
 
 impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
     /// THE GENERAL HANDLER. A clause is given the rest of the program, `k`, as a value.
-    pub fn new<P: Comp<R, B>, Q: Comp<R, B>>(
+    pub fn new<P: Program<B, R>, Q: Program<B, R>>(
         ret: impl Fn(A) -> P + 'static,
-        on: impl Fn(E, K<R, B>) -> Q + 'static,
+        on: impl Fn(E, K<B, R>) -> Q + 'static,
     ) -> Self {
         let ret = Box::new(move |_, a: Val, m: &mut Machine| ret(a.take()).start(Ret, m));
         let on = Rc::new(move |op: Val, k, m: &mut Machine| on(op.take(), K { k, of: PhantomData }).start(Ret, m));
@@ -583,7 +583,7 @@ impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
     /// THE HANDLER IN PLACE: every operation answered at once, from a state the handler keeps — nothing is
     /// captured, the program goes on. The state belongs to the path: a continuation resumed twice starts twice
     /// from the state it was taken with.
-    pub fn in_place<S: Clone + 'static, P: Comp<R, B>>(
+    pub fn in_place<S: Clone + 'static, P: Program<B, R>>(
         s0: S,
         ret: impl Fn(S, A) -> P + 'static,
         answer: impl Fn(&mut S, E) -> Answer + 'static,
@@ -601,12 +601,12 @@ impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
     }
 
     /// The operations of `E` answered, every other one passing outside; `E` leaves the row.
-    pub fn handle<In: Has<E, I, Rest = R>, I, C: Comp<In, A>>(self, p: C) -> Handled<C, R, B> {
+    pub fn handle<In: Has<E, I, Rest = R>, I, C: Program<A, In>>(self, p: C) -> Handled<C, B, R> {
         Handled { mark: Rc::new(self.mark), state: self.state, body: p, of: PhantomData }
     }
 
     /// `handle`, the effect kept in the row: a clause may ask the operation again — interception, audit.
-    pub fn intercept<I, C: Comp<R, A>>(self, p: C) -> Handled<C, R, B>
+    pub fn intercept<I, C: Program<A, R>>(self, p: C) -> Handled<C, B, R>
     where
         R: Has<E, I>,
     {
@@ -615,14 +615,14 @@ impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
 }
 
 /// A computation under a handler: a `B`, asking the row `R`.
-pub struct Handled<C, R, B> {
+pub struct Handled<C, B, R> {
     mark: Rc<Mark>,
     state: State,
     body: C,
-    of: PhantomData<fn() -> (R, B)>,
+    of: PhantomData<fn() -> (B, R)>,
 }
 
-impl<C: Start, R: 'static, B: 'static> Start for Handled<C, R, B> {
+impl<C: Start, B: 'static, R: 'static> Start for Handled<C, B, R> {
     type Row = R;
     type Out = B;
 

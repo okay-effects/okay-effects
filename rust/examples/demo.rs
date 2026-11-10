@@ -14,7 +14,7 @@ use okay_effects::json::{Json, Ref};
 use okay_effects::wire::escapes::enc;
 use okay_effects::wire::{Asking, Condition, Failing, Far, Fed, Foreign, Module, Remote, Row, Streaming, Thing};
 use okay_effects::wire::{call, serve};
-use okay_effects::{Comp, Dyn, Handler, Has, K, defer, pure};
+use okay_effects::{Comp, Handler, Has, K, Program, defer, pure};
 
 // -- THE MODULE the worker serves; what it remembers is the worker's, for as long as it lives
 
@@ -30,7 +30,7 @@ fn times(n: i64, x: Json) -> Json {
     }
 }
 
-fn total(items: Vec<Json>, i: usize, sum: i64) -> Dyn<Row, Json> {
+fn total(items: Vec<Json>, i: usize, sum: i64) -> Comp<Json, Row> {
     if i == items.len() {
         return pure(Json::Int(sum)).boxed();
     }
@@ -42,7 +42,7 @@ fn total(items: Vec<Json>, i: usize, sum: i64) -> Dyn<Row, Json> {
     price.flat_map(priced).boxed()
 }
 
-fn count(n: Json, done: i64) -> Dyn<Row, Json> {
+fn count(n: Json, done: i64) -> Comp<Json, Row> {
     if n == Json::Int(done) {
         return pure(n).boxed();
     }
@@ -50,7 +50,7 @@ fn count(n: Json, done: i64) -> Dyn<Row, Json> {
 }
 
 /// each value is counted when it has gone out, not while the function waits for credit
-fn numbers(next: i64, last: i64, sent: Rc<Cell<i64>>) -> Dyn<Row, Json> {
+fn numbers(next: i64, last: i64, sent: Rc<Cell<i64>>) -> Comp<Json, Row> {
     if next > last {
         return pure(Json::Null).boxed();
     }
@@ -61,7 +61,7 @@ fn numbers(next: i64, last: i64, sent: Rc<Cell<i64>>) -> Dyn<Row, Json> {
     Emit::send(Json::Int(next)).then(counted).boxed()
 }
 
-fn dedup(seen: Rc<Vec<Json>>) -> Dyn<Row, Json> {
+fn dedup(seen: Rc<Vec<Json>>) -> Comp<Json, Row> {
     let fed = move |value| match value {
         None => pure(Json::Null).boxed(),
         Some(value) if seen.contains(&value) => dedup(seen),
@@ -94,13 +94,13 @@ impl Thing for Counter {
 }
 
 /// a function of the module, from its cases; any other arguments are refused by name
-fn function<P: Comp<Row, Json>>(
+fn function<P: Program<Json, Row>>(
     module: &mut Module,
     name: &'static str,
     cases: impl Fn(&[Json]) -> Option<P> + 'static,
 ) {
     let refused = move || Throws::raise(Condition::new("TypeError", format!("{name}: not its arguments"))).boxed();
-    module.functions.insert(name, Box::new(move |args| cases(args).map_or_else(refused, Comp::boxed)));
+    module.functions.insert(name, Box::new(move |args| cases(args).map_or_else(refused, Program::boxed)));
 }
 
 fn module() -> Module {
@@ -180,8 +180,8 @@ fn module() -> Module {
 // -- THE HOST
 
 /// This side's answers: every choice taken, a price looked up, a tick counted.
-fn answered<R: Has<Foreign, I>, I>(p: impl Comp<R, Json>) -> impl Comp<R::Rest, Vec<Json>> {
-    let on = |op, k: K<R::Rest, Vec<Json>>| match op {
+fn answered<R: Has<Foreign, I>, I>(p: impl Program<Json, R>) -> impl Program<Vec<Json>, R::Rest> {
+    let on = |op, k: K<Vec<Json>, R::Rest>| match op {
         Foreign::Call(name, args, r) => match (name.as_str(), args.as_slice()) {
             ("choose", [Json::Arr(values)]) => values.iter().fold(pure(Vec::new()).boxed(), |found, x| {
                 let (k, x) = (k.clone(), x.clone());
@@ -196,18 +196,18 @@ fn answered<R: Has<Foreign, I>, I>(p: impl Comp<R, Json>) -> impl Comp<R::Rest, 
 }
 
 /// the program's value on a far side, or the far side's failure
-fn on<A: Display + 'static>(far: &Remote, p: impl Comp<Failing, A>) -> String {
+fn on<A: Display + 'static>(far: &Remote, p: impl Program<A, Failing>) -> String {
     match far.run(Throws::run(p)) {
         Ok(value) => value.to_string(),
         Err(Condition { kind, message }) => format!("{kind}: {message}"),
     }
 }
 
-fn all(p: impl Comp<Asking, Json>) -> impl Comp<Failing, Json> {
+fn all(p: impl Program<Json, Asking>) -> impl Program<Json, Failing> {
     answered(p).map(Json::Arr)
 }
 
-fn sent(p: impl Comp<Streaming, ()>) -> impl Comp<Failing, Json> {
+fn sent(p: impl Program<(), Streaming>) -> impl Program<Json, Failing> {
     Emit::collect(p).map(|(values, _)| Json::Arr(values))
 }
 

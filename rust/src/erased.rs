@@ -162,7 +162,7 @@ impl Drop for Erased {
 mod tests {
     use super::*;
     use crate::machine::run;
-    use crate::{Comp, Dyn, pure};
+    use crate::{Comp, Program, pure};
 
     fn started<A: 'static>(erased: Erased) -> A {
         run(|m| erased.start(m)).ok().expect("a value").take()
@@ -171,9 +171,9 @@ mod tests {
     #[test]
     fn a_computation_small_or_big_is_dropped_once_started_or_not() {
         let held = Rc::new(());
-        let small = || Erased::new(pure::<(), _>(held.clone()));
-        let big = || Erased::new(pure::<(), _>([held.clone(), held.clone(), held.clone(), held.clone(), held.clone()]));
-        assert!(Erased::fits::<crate::Pure<(), Rc<()>>>() && !Erased::fits::<crate::Pure<(), [Rc<()>; 5]>>());
+        let small = || Erased::new(pure::<_, ()>(held.clone()));
+        let big = || Erased::new(pure::<_, ()>([held.clone(), held.clone(), held.clone(), held.clone(), held.clone()]));
+        assert!(Erased::fits::<crate::Pure<Rc<()>, ()>>() && !Erased::fits::<crate::Pure<[Rc<()>; 5], ()>>());
         assert_eq!(Rc::strong_count(&started::<Rc<()>>(small())), 2);
         assert_eq!(started::<[Rc<()>; 5]>(big()).len(), 5);
         assert_eq!(Rc::strong_count(&held), 1);
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn what_is_erased_already_stays_as_it_is() {
         let held = Rc::new(());
-        let once: Dyn<(), Rc<()>> = pure(held.clone()).boxed();
+        let once: Comp<Rc<()>, ()> = pure(held.clone()).boxed();
         let twice = once.boxed().boxed();
         assert_eq!(Rc::strong_count(&twice.run()), 2);
     }
@@ -195,7 +195,7 @@ mod tests {
     fn one_inside_another_a_hundred_thousand_deep_is_dropped_in_a_loop_each_once() {
         let held = Rc::new(());
         let inner = held.clone();
-        let chain = (0..100_000).fold(pure::<(), _>(0).boxed(), |inside, _| {
+        let chain = (0..100_000).fold(pure::<_, ()>(0).boxed(), |inside, _| {
             let holds = inner.clone();
             // each is more than the room: it is in a box, and holds the one before
             inside.map(move |n: i32| n + Rc::strong_count(&holds) as i32).boxed()
@@ -205,7 +205,7 @@ mod tests {
         assert_eq!(Rc::strong_count(&held), 2);
         // and the list is left as it was: the next drop is an outermost one again
         assert!(WAITING.with(|waiting| waiting.take().is_none()));
-        drop(pure::<(), _>(inner).boxed().map(|held| held).boxed());
+        drop(pure::<_, ()>(inner).boxed().map(|held| held).boxed());
         assert_eq!(Rc::strong_count(&held), 1);
     }
 }

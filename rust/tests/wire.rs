@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use okay_effects::effects::{Emit, Throws};
 use okay_effects::json::Json;
 use okay_effects::wire::{Asking, Condition, Failing, Far, Foreign, Remote, Streaming};
-use okay_effects::{Comp, Handler, K, pure};
+use okay_effects::{Handler, K, Program, pure};
 
 /// the demonstration, which `cargo test` builds beside this test: target/<profile>/examples/demo
 fn demo() -> PathBuf {
@@ -25,11 +25,11 @@ fn far() -> Remote {
     Remote::start(&worker(), false, false, None).unwrap_or_else(|c| panic!("{}: {}", c.kind, c.message))
 }
 
-fn on<A: 'static>(far: &Remote, p: impl Comp<Failing, A>) -> Result<A, Condition> {
+fn on<A: 'static>(far: &Remote, p: impl Program<A, Failing>) -> Result<A, Condition> {
     far.run(Throws::run(p))
 }
 
-fn sent(far: &Remote, p: impl Comp<Streaming, ()>) -> Result<Vec<Json>, Condition> {
+fn sent(far: &Remote, p: impl Program<(), Streaming>) -> Result<Vec<Json>, Condition> {
     on(far, Emit::collect(p).map(|(values, _)| values))
 }
 
@@ -97,7 +97,7 @@ fn a_program_of_the_far_side_asks_this_sides_handlers_as_often_as_they_resume_it
     let far = far();
     // every price asked is a choice of two: the far program's rest is continued twice at each, four sums in all
     let p = Far::program::<Asking, _>("shop:total", vec![Json::str("tea"), Json::str("milk")], &["price_of"]);
-    let on_call = |op, k: K<Failing, Vec<Json>>| match op {
+    let on_call = |op, k: K<Vec<Json>, Failing>| match op {
         Foreign::Call(_, _, r) => k
             .resume(r, Json::Int(1))
             .flat_map(move |low| k.resume(r, Json::Int(10)).map(move |high| [low.clone(), high].concat())),

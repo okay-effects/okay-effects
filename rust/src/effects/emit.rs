@@ -5,20 +5,20 @@ use std::cell::{OnceCell, RefCell};
 use std::mem::swap;
 use std::rc::Rc;
 
-use crate::{Comp, Dyn, Handler, Has, K, Reply, There, defer, perform, pure, row};
+use crate::{Comp, Handler, Has, K, Program, Reply, There, defer, eff, perform, pure};
 
 pub enum Emit<T> {
     Send(T, Reply<()>),
 }
 
 impl<T: Clone + 'static> Emit<T> {
-    pub fn send<R: Has<Self, I>, I>(value: T) -> impl Comp<R, ()> {
+    pub fn send<R: Has<Self, I>, I>(value: T) -> impl Program<(), R> {
         perform(|r| Emit::Send(value, r))
     }
 
     /// Every value of a sequence, which may be lazy and endless.
-    pub fn send_all<R: Has<Self, I>, I: 'static>(values: impl IntoIterator<Item = T> + 'static) -> Dyn<R, ()> {
-        fn from<T: Clone + 'static, R: Has<Emit<T>, I>, I: 'static>(at: Lazy<T>) -> Dyn<R, ()> {
+    pub fn send_all<R: Has<Self, I>, I: 'static>(values: impl IntoIterator<Item = T> + 'static) -> Comp<(), R> {
+        fn from<T: Clone + 'static, R: Has<Emit<T>, I>, I: 'static>(at: Lazy<T>) -> Comp<(), R> {
             defer(move || match at.get() {
                 None => pure(()).boxed(),
                 Some((value, rest)) => Emit::send(value).then(move || from(rest)).boxed(),
@@ -28,7 +28,7 @@ impl<T: Clone + 'static> Emit<T> {
     }
 
     /// The values sent, with the program's own.
-    pub fn collect<R: Has<Self, I>, I, A: 'static>(p: impl Comp<R, A>) -> impl Comp<R::Rest, (Vec<T>, A)> {
+    pub fn collect<R: Has<Self, I>, I, A: 'static>(p: impl Program<A, R>) -> impl Program<(Vec<T>, A), R::Rest> {
         let answer = |sent: &mut Vec<T>, op| match op {
             Emit::Send(value, r) => {
                 sent.push(value);
@@ -39,11 +39,11 @@ impl<T: Clone + 'static> Emit<T> {
     }
 
     /// `f` run for each value, as it is sent.
-    pub fn each<R: Has<Self, I>, I, A: 'static, P: Comp<R::Rest, ()>>(
+    pub fn each<R: Has<Self, I>, I, A: 'static, P: Program<(), R::Rest>>(
         f: impl Fn(T) -> P + 'static,
-        p: impl Comp<R, A>,
-    ) -> impl Comp<R::Rest, A> {
-        let on = move |op, k: K<R::Rest, A>| match op {
+        p: impl Program<A, R>,
+    ) -> impl Program<A, R::Rest> {
+        let on = move |op, k: K<A, R::Rest>| match op {
             Emit::Send(value, r) => f(value).then(move || k.resume(r, ())),
         };
         Handler::new(pure, on).handle(p)
@@ -52,9 +52,9 @@ impl<T: Clone + 'static> Emit<T> {
     /// A stream of the values, each through `f`.
     pub fn map<R: Has<Self, I>, I: 'static, U: Clone + 'static, A: 'static>(
         f: impl Fn(T) -> U + 'static,
-        p: impl Comp<R, A>,
-    ) -> impl Comp<(Emit<U>, R::Rest), A> {
-        let on = move |op, k: K<(Emit<U>, R::Rest), A>| match op {
+        p: impl Program<A, R>,
+    ) -> impl Program<A, (Emit<U>, R::Rest)> {
+        let on = move |op, k: K<A, (Emit<U>, R::Rest)>| match op {
             Emit::Send(value, r) => Emit::send(f(value)).then(move || k.resume(r, ())),
         };
         Handler::new(pure, on).handle::<_, There<I>, _>(p.also::<Emit<U>>())
@@ -63,9 +63,9 @@ impl<T: Clone + 'static> Emit<T> {
     /// A stream of the values that `keep`: the others are not sent on.
     pub fn filter<R: Has<Self, I>, I: 'static, A: 'static>(
         keep: impl Fn(&T) -> bool + 'static,
-        p: impl Comp<R, A>,
-    ) -> impl Comp<R, A> {
-        let on = move |op, k: K<R, A>| match op {
+        p: impl Program<A, R>,
+    ) -> impl Program<A, R> {
+        let on = move |op, k: K<A, R>| match op {
             Emit::Send(value, r) if keep(&value) => Self::send(value).then(move || k.resume(r, ())).boxed(),
             Emit::Send(_, r) => k.resume(r, ()).boxed(),
         };
@@ -73,10 +73,10 @@ impl<T: Clone + 'static> Emit<T> {
     }
 
     /// A stream of the first `n` values; the producer is not resumed after them.
-    pub fn take<R: Has<Self, I>, I: 'static, A: 'static>(n: usize, p: impl Comp<R, A>) -> impl Comp<R, ()> {
+    pub fn take<R: Has<Self, I>, I: 'static, A: 'static>(n: usize, p: impl Program<A, R>) -> impl Program<(), R> {
         // what is sent on depends on how many are still wanted: the handler answers with a function of that
-        type Left<R> = Rc<dyn Fn(usize) -> Dyn<R, ()>>;
-        let on = |op: Self, k: K<R, Left<R>>| match op {
+        type Left<R> = Rc<dyn Fn(usize) -> Comp<(), R>>;
+        let on = |op: Self, k: K<Left<R>, R>| match op {
             Emit::Send(value, r) => pure(Rc::new(move |left| {
                 if left == 0 {
                     return pure(()).boxed();
@@ -94,7 +94,7 @@ impl<T: Clone + 'static> Emit<T> {
     }
 
     /// The values, pulled as they are needed: the producer runs no further than was asked.
-    pub fn pull<A: 'static>(p: impl Comp<row![Emit<T>], A>) -> Pull<T> {
+    pub fn pull<A: 'static>(p: impl Program<A, eff![Emit<T>]>) -> Pull<T> {
         let on = |op, k| match op {
             Emit::Send(value, r) => pure(Sent(Some((value, r, k)))),
         };
@@ -103,17 +103,17 @@ impl<T: Clone + 'static> Emit<T> {
 
     /// Two streams, value by value in pairs, as long as both last.
     pub fn zip<U: Clone + 'static, A: 'static, B: 'static, R: Has<Emit<(T, U)>, I>, I: 'static>(
-        a: impl Comp<row![Emit<T>], A>,
-        b: impl Comp<row![Emit<U>], B>,
-    ) -> Dyn<R, ()> {
+        a: impl Program<A, eff![Emit<T>]>,
+        b: impl Program<B, eff![Emit<U>]>,
+    ) -> Comp<(), R> {
         Emit::send_all(Emit::pull(a).zip(Emit::pull(b)))
     }
 
     /// Two streams in turn, a value of each; then what is left of the longer.
     pub fn merge<A: 'static, B: 'static, R: Has<Self, I>, I: 'static>(
-        a: impl Comp<row![Emit<T>], A>,
-        b: impl Comp<row![Emit<T>], B>,
-    ) -> Dyn<R, ()> {
+        a: impl Program<A, eff![Emit<T>]>,
+        b: impl Program<B, eff![Emit<T>]>,
+    ) -> Comp<(), R> {
         let (mut first, mut second) = (Emit::pull(a), Emit::pull(b));
         Emit::send_all(std::iter::from_fn(move || {
             swap(&mut first, &mut second);
@@ -123,11 +123,11 @@ impl<T: Clone + 'static> Emit<T> {
 }
 
 /// A stream stopped at a value it sent, with the rest of it; or ended.
-struct Sent<T>(Option<(T, Reply<()>, K<(), Sent<T>>)>);
+struct Sent<T>(Option<(T, Reply<()>, K<Sent<T>, ()>)>);
 
 /// The values of a stream, as an iterator.
 pub struct Pull<T> {
-    rest: Option<Dyn<(), Sent<T>>>,
+    rest: Option<Comp<Sent<T>, ()>>,
 }
 
 impl<T: 'static> Iterator for Pull<T> {
