@@ -25,11 +25,11 @@ fn far() -> Remote {
     Remote::start(&worker(), false, false, None).unwrap_or_else(|c| panic!("{}: {}", c.kind, c.message))
 }
 
-fn on<A: 'static>(far: &Remote, p: Comp<Failing, A>) -> Result<A, Condition> {
+fn on<A: 'static>(far: &Remote, p: impl Comp<Failing, A>) -> Result<A, Condition> {
     far.run(Throws::run(p))
 }
 
-fn sent(far: &Remote, p: Comp<Streaming, ()>) -> Result<Vec<Json>, Condition> {
+fn sent(far: &Remote, p: impl Comp<Streaming, ()>) -> Result<Vec<Json>, Condition> {
     on(far, Emit::collect(p).map(|(values, _)| values))
 }
 
@@ -96,7 +96,7 @@ fn a_stream_the_far_side_is_never_more_than_the_credit_ahead_a_long_one_in_const
 fn a_program_of_the_far_side_asks_this_sides_handlers_as_often_as_they_resume_it() {
     let far = far();
     // every price asked is a choice of two: the far program's rest is continued twice at each, four sums in all
-    let p: Comp<Asking, Json> = Far::program("shop:total", vec![Json::str("tea"), Json::str("milk")], &["price_of"]);
+    let p = Far::program::<Asking, _>("shop:total", vec![Json::str("tea"), Json::str("milk")], &["price_of"]);
     let on_call = |op, k: K<Failing, Vec<Json>>| match op {
         Foreign::Call(_, _, r) => k
             .resume(r, Json::Int(1))

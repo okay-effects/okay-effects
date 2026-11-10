@@ -1,14 +1,15 @@
-//! A VALUE OF ANY TYPE, kept in place when it is no bigger than two words, in a box when it is. Every value and
-//! every operation of a program passes through the machine as one of these. A `Box<dyn Any>` would do, and did:
-//! but most values are small, a box for each was more than half of the machine's allocations, and allocation is
-//! most of its time. Measured with examples/bench.rs, boxes against this: `state` 35 → 25 ns an operation,
-//! `reader3` 31 → 22, `choose` 275 → 238, `binds` 24 → 17.
+//! A VALUE OF ANY TYPE, kept in place when it is no bigger than two words, in a box when it is. Every operation,
+//! every answer and every value a frame waits for passes through the machine as one of these. A `Box<dyn Any>`
+//! would do, and did: but most values are small, and a box for each was more than half of the machine's
+//! allocations. Measured with examples/bench.rs when every bind was a frame, boxes against this: `state` 35 → 25 ns
+//! an operation, `reader3` 31 → 22, `choose` 275 → 238, `binds` 24 → 17. (Three words, to keep a `Vec` in place,
+//! were tried on the machine of today: `state` 5.7 → 6.5, `choose` the same.)
 //!
-//! The kernel's `unsafe` is here and in pool.rs, whose boxes these are. This is sound because the room is written
-//! once, in `new`, with a `T` that fits it in size and alignment, and `kind` says which; it is read only as that
-//! `T` — `take` and `get` compare the type first, `drop` is the function made for it; and it is read out at most
-//! once — `take` forgets the value it emptied, so `drop` does not see it. A value may hold an `Rc`, so the marker
-//! keeps it on its thread.
+//! The kernel's `unsafe` is here, in erased.rs and in pool.rs, whose boxes these are. This is sound because the
+//! room is written once, in `new`, with a `T` that fits it in size and alignment, and `kind` says which; it is
+//! read only as that `T` — `take` and `get` compare the type first, `drop` is the function made for it; and it is
+//! read out at most once — `take` forgets the value it emptied, so `drop` does not see it. A value may hold an
+//! `Rc`, so the marker keeps it on its thread.
 
 use std::any::TypeId;
 use std::marker::PhantomData;
@@ -19,7 +20,7 @@ use crate::pool::Owned;
 
 type Room = MaybeUninit<[usize; 2]>;
 
-pub(crate) struct Val {
+pub struct Val {
     kind: &'static Kind,
     room: Room,
     here: PhantomData<Rc<()>>,
@@ -57,18 +58,18 @@ unsafe fn drop_kept<T>(room: &mut Room) {
 }
 
 impl Val {
-    pub(crate) fn new<A: 'static>(a: A) -> Val {
+    pub fn new<A: 'static>(a: A) -> Val {
         // SAFETY: what is put fits, by the test
         let room = if Of::<A>::FITS { unsafe { put(a) } } else { unsafe { put(Owned::new(a)) } };
         Val { kind: Of::<A>::KIND, room, here: PhantomData }
     }
 
     /// the type of the value
-    pub(crate) fn kind(&self) -> TypeId {
+    pub fn kind(&self) -> TypeId {
         self.kind.id
     }
 
-    pub(crate) fn get<A: 'static>(&self) -> Option<&A> {
+    pub fn get<A: 'static>(&self) -> Option<&A> {
         if self.kind.id != TypeId::of::<A>() {
             return None;
         }
@@ -80,7 +81,7 @@ impl Val {
         })
     }
 
-    pub(crate) fn take<A: 'static>(mut self) -> A {
+    pub fn take<A: 'static>(mut self) -> A {
         assert!(self.kind.id == TypeId::of::<A>(), "a value of the type its place in the program says");
         // SAFETY: as in `get`; and `self` is forgotten, so what is read out here is not dropped again
         let a = if Of::<A>::FITS {

@@ -3,7 +3,7 @@
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{Comp, Handler, Has, K, Never, Reply, perform, pure};
+use crate::{Comp, Dyn, Handler, Has, K, Never, Reply, perform, pure};
 
 mod emit;
 mod later;
@@ -18,20 +18,20 @@ pub enum State<S> {
 }
 
 impl<S: Clone + 'static> State<S> {
-    pub fn get<R: Has<Self, I>, I>() -> Comp<R, S> {
+    pub fn get<R: Has<Self, I>, I>() -> impl Comp<R, S> {
         perform(State::Get)
     }
 
-    pub fn put<R: Has<Self, I>, I>(s: S) -> Comp<R, ()> {
+    pub fn put<R: Has<Self, I>, I>(s: S) -> impl Comp<R, ()> {
         perform(|r| State::Put(s, r))
     }
 
-    pub fn modify<R: Has<Self, I>, I>(f: impl Fn(S) -> S + 'static) -> Comp<R, ()> {
+    pub fn modify<R: Has<Self, I>, I>(f: impl FnOnce(S) -> S + Clone + 'static) -> impl Comp<R, ()> {
         Self::get().flat_map(move |s| Self::put(f(s)))
     }
 
     /// The state kept by the handler, answered in place; each path of the program has its own.
-    pub fn run<R: Has<Self, I>, I, A: 'static>(s0: S, p: Comp<R, A>) -> Comp<R::Rest, (S, A)> {
+    pub fn run<R: Has<Self, I>, I, A: 'static>(s0: S, p: impl Comp<R, A>) -> impl Comp<R::Rest, (S, A)> {
         let answer = |state: &mut S, op| match op {
             State::Get(r) => r.give(state.clone()),
             State::Put(s, r) => {
@@ -49,11 +49,11 @@ pub enum Reader<V> {
 }
 
 impl<V: Clone + 'static> Reader<V> {
-    pub fn ask<R: Has<Self, I>, I>() -> Comp<R, V> {
+    pub fn ask<R: Has<Self, I>, I>() -> impl Comp<R, V> {
         perform(Reader::Ask)
     }
 
-    pub fn run<R: Has<Self, I>, I, A: 'static>(value: V, p: Comp<R, A>) -> Comp<R::Rest, A> {
+    pub fn run<R: Has<Self, I>, I, A: 'static>(value: V, p: impl Comp<R, A>) -> impl Comp<R::Rest, A> {
         let answer = move |_: &mut (), op| match op {
             Reader::Ask(r) => r.give(value.clone()),
         };
@@ -61,7 +61,7 @@ impl<V: Clone + 'static> Reader<V> {
     }
 
     /// The program, its asks answered by the reader outside, through `f`: an interceptor.
-    pub fn local<R: Has<Self, I>, I, A: 'static>(f: impl Fn(V) -> V + 'static, p: Comp<R, A>) -> Comp<R, A> {
+    pub fn local<R: Has<Self, I>, I, A: 'static>(f: impl Fn(V) -> V + 'static, p: impl Comp<R, A>) -> impl Comp<R, A> {
         let f = Rc::new(f);
         let on = move |op, k: K<R, A>| match op {
             Reader::Ask(r) => {
@@ -79,11 +79,11 @@ pub enum Writer<W> {
 }
 
 impl<W: Clone + 'static> Writer<W> {
-    pub fn tell<R: Has<Self, I>, I>(w: W) -> Comp<R, ()> {
+    pub fn tell<R: Has<Self, I>, I>(w: W) -> impl Comp<R, ()> {
         perform(|r| Writer::Tell(w, r))
     }
 
-    pub fn run<R: Has<Self, I>, I, A: 'static>(p: Comp<R, A>) -> Comp<R::Rest, (Vec<W>, A)> {
+    pub fn run<R: Has<Self, I>, I, A: 'static>(p: impl Comp<R, A>) -> impl Comp<R::Rest, (Vec<W>, A)> {
         let answer = |told: &mut Vec<W>, op| match op {
             Writer::Tell(w, r) => {
                 told.push(w);
@@ -100,11 +100,11 @@ pub enum Throws<E> {
 }
 
 impl<E: 'static> Throws<E> {
-    pub fn raise<R: Has<Self, I>, I, A: 'static>(error: E) -> Comp<R, A> {
+    pub fn raise<R: Has<Self, I>, I, A: 'static>(error: E) -> impl Comp<R, A> {
         perform(|r| Throws::Raise(error, r)).map(|never: Never| match never {})
     }
 
-    pub fn run<R: Has<Self, I>, I, A: 'static>(p: Comp<R, A>) -> Comp<R::Rest, Result<A, E>> {
+    pub fn run<R: Has<Self, I>, I, A: 'static>(p: impl Comp<R, A>) -> impl Comp<R::Rest, Result<A, E>> {
         let on = |op, _| match op {
             Throws::Raise(error, _) => pure(Err(error)),
         };
@@ -112,10 +112,10 @@ impl<E: 'static> Throws<E> {
     }
 
     /// The program, or what `rescue` makes of its failure.
-    pub fn recover<R: Has<Self, I>, I, A: 'static>(
-        rescue: impl Fn(E) -> Comp<R::Rest, A> + 'static,
-        p: Comp<R, A>,
-    ) -> Comp<R::Rest, A> {
+    pub fn recover<R: Has<Self, I>, I, A: 'static, P: Comp<R::Rest, A>>(
+        rescue: impl Fn(E) -> P + 'static,
+        p: impl Comp<R, A>,
+    ) -> impl Comp<R::Rest, A> {
         let on = move |op, _| match op {
             Throws::Raise(error, _) => rescue(error),
         };
@@ -130,31 +130,38 @@ pub enum Choose {
 }
 
 impl Choose {
-    pub fn among<R: Has<Self, I>, I, X: Clone + 'static>(xs: Vec<X>) -> Comp<R, X> {
+    pub fn among<R: Has<Self, I>, I, X: Clone + 'static>(xs: Vec<X>) -> impl Comp<R, X> {
+        // shared: what follows an operation is copied each time its continuation is resumed again
+        let xs = Rc::new(xs);
         perform(|r| Choose::Among(xs.len(), r)).map(move |i: usize| xs[i].clone())
     }
 
     /// No value: this path ends.
-    pub fn none<R: Has<Self, I>, I, X: 'static>() -> Comp<R, X> {
+    pub fn none<R: Has<Self, I>, I, X: 'static>() -> impl Comp<R, X> {
         perform(|r| Choose::Among(0, r)).map(|_: usize| unreachable!("one of none"))
     }
 
     /// Every value the program comes to.
-    pub fn all<R: Has<Self, I>, I, A: Clone + 'static>(p: Comp<R, A>) -> Comp<R::Rest, Vec<A>> {
+    pub fn all<R: Has<Self, I>, I, A: Clone + 'static>(p: impl Comp<R, A>) -> impl Comp<R::Rest, Vec<A>> {
         // the values of the paths from the `i`-th of `n` on, after those `found` before
         fn from<T: 'static, A: Clone + 'static>(
             k: K<T, Vec<A>>,
             r: Reply<usize>,
             (i, n): (usize, usize),
             found: Vec<A>,
-        ) -> Comp<T, Vec<A>> {
+        ) -> Dyn<T, Vec<A>> {
             if i == n {
-                return pure(found);
+                return pure(found).boxed();
             }
-            k.resume(r, i).flat_map(move |more| {
-                let found = found.iter().cloned().chain(more).collect();
-                from(k.clone(), r, (i + 1, n), found)
-            })
+            let path = k.resume(r, i);
+            path.flat_map(move |more| from(k, r, (i + 1, n), joined(found, more))).boxed()
+        }
+        fn joined<A>(mut found: Vec<A>, more: Vec<A>) -> Vec<A> {
+            if found.is_empty() {
+                return more;
+            }
+            found.extend(more);
+            found
         }
         let on = |op, k| match op {
             Choose::Among(n, r) => from(k, r, (0, n), Vec::new()),
@@ -163,20 +170,22 @@ impl Choose {
     }
 
     /// The first value the program comes to, the other paths not taken.
-    pub fn first<R: Has<Self, I>, I, A: 'static>(p: Comp<R, A>) -> Comp<R::Rest, Option<A>> {
+    pub fn first<R: Has<Self, I>, I, A: 'static>(p: impl Comp<R, A>) -> impl Comp<R::Rest, Option<A>> {
         // the first value of the paths from the `i`-th of `n` on
         fn from<T: 'static, A: 'static>(
             k: K<T, Option<A>>,
             r: Reply<usize>,
             (i, n): (usize, usize),
-        ) -> Comp<T, Option<A>> {
+        ) -> Dyn<T, Option<A>> {
             if i == n {
-                return pure(None);
+                return pure(None).boxed();
             }
-            k.resume(r, i).flat_map(move |found| match found {
-                Some(a) => pure(Some(a)),
-                None => from(k.clone(), r, (i + 1, n)),
+            let path = k.resume(r, i);
+            path.flat_map(move |found| match found {
+                Some(a) => pure(Some(a)).boxed(),
+                None => from(k, r, (i + 1, n)),
             })
+            .boxed()
         }
         let on = |op, k| match op {
             Choose::Among(n, r) => from(k, r, (0, n)),
@@ -191,11 +200,11 @@ pub enum Fresh {
 }
 
 impl Fresh {
-    pub fn fresh<R: Has<Self, I>, I>() -> Comp<R, i64> {
+    pub fn fresh<R: Has<Self, I>, I>() -> impl Comp<R, i64> {
         perform(Fresh::Next)
     }
 
-    pub fn run<R: Has<Self, I>, I, A: 'static>(p: Comp<R, A>) -> Comp<R::Rest, A> {
+    pub fn run<R: Has<Self, I>, I, A: 'static>(p: impl Comp<R, A>) -> impl Comp<R::Rest, A> {
         let answer = |next: &mut i64, op| match op {
             Fresh::Next(r) => {
                 *next += 1;
@@ -212,16 +221,19 @@ pub enum Clock {
 }
 
 impl Clock {
-    pub fn now<R: Has<Self, I>, I>() -> Comp<R, i64> {
+    pub fn now<R: Has<Self, I>, I>() -> impl Comp<R, i64> {
         perform(Clock::Now)
     }
 
-    pub fn system<R: Has<Self, I>, I, A: 'static>(p: Comp<R, A>) -> Comp<R::Rest, A> {
+    pub fn system<R: Has<Self, I>, I, A: 'static>(p: impl Comp<R, A>) -> impl Comp<R::Rest, A> {
         let millis = || SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as i64);
         Self::at(millis, p)
     }
 
-    pub fn at<R: Has<Self, I>, I, A: 'static>(time: impl Fn() -> i64 + 'static, p: Comp<R, A>) -> Comp<R::Rest, A> {
+    pub fn at<R: Has<Self, I>, I, A: 'static>(
+        time: impl Fn() -> i64 + 'static,
+        p: impl Comp<R, A>,
+    ) -> impl Comp<R::Rest, A> {
         let answer = move |_: &mut (), op| match op {
             Clock::Now(r) => r.give(time()),
         };

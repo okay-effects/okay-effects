@@ -6,27 +6,27 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use okay_effects::effects::{Choose, Reader, State, Writer};
-use okay_effects::{Comp, pure, row};
+use okay_effects::{Comp, Dyn, pure, row};
 
-fn count(n: i64) -> Comp<row![State<i64>], i64> {
+fn count(n: i64) -> Dyn<row![State<i64>], i64> {
     if n == 0 {
-        return State::get();
+        return State::get().boxed();
     }
-    State::get().flat_map(|s: i64| State::put(s + 1)).then(move || count(n - 1))
+    State::get().flat_map(|s: i64| State::put(s + 1)).then(move || count(n - 1)).boxed()
 }
 
 type Under3 = row![Writer<String>, State<String>, State<i64>, Reader<i64>];
 
-fn asks(n: i64, sum: i64) -> Comp<Under3, i64> {
-    if n == 0 { pure(sum) } else { Reader::ask().flat_map(move |x: i64| asks(n - 1, sum + x)) }
+fn asks(n: i64, sum: i64) -> Dyn<Under3, i64> {
+    if n == 0 { pure(sum).boxed() } else { Reader::ask().flat_map(move |x: i64| asks(n - 1, sum + x)).boxed() }
 }
 
-fn tree(depth: u32) -> Comp<row![Choose], i64> {
-    if depth == 0 { pure(1) } else { Choose::among(vec![0, 1]).then(move || tree(depth - 1)) }
+fn tree(depth: u32) -> Dyn<row![Choose], i64> {
+    if depth == 0 { pure(1).boxed() } else { Choose::among(vec![0, 1]).then(move || tree(depth - 1)).boxed() }
 }
 
-fn binds(n: i64, sum: i64) -> Comp<(), i64> {
-    if n == 0 { pure(sum) } else { pure(1).flat_map(move |x: i64| binds(n - 1, sum + x)) }
+fn binds(n: i64, sum: i64) -> Dyn<(), i64> {
+    if n == 0 { pure(sum).boxed() } else { pure(1).flat_map(move |x: i64| binds(n - 1, sum + x)).boxed() }
 }
 
 fn measure<A>(name: &str, ops: u32, body: impl Fn() -> A) {

@@ -82,7 +82,7 @@ enum Fail {
     Raise(i32, i32, Reply<i32>),
 }
 
-type Program = Comp<row![Log, Cell, Fail, Choose], i32>;
+type Program = Dyn<row![Log, Cell, Fail, Choose], i32>;
 
 fn writer(e: i32, p: Program) -> Program {
     let on = |op, k: K<_, (i32, i32)>| match op {
@@ -92,6 +92,7 @@ fn writer(e: i32, p: Program) -> Program {
         .mine(move |op| matches!(op, Log::Tell(id, _, _) if *id == e))
         .intercept(p)
         .map(|(sum, a)| a.wrapping_mul(100).wrapping_add(sum))
+        .boxed()
 }
 
 /// the TCK's state is a cell made where the handler is installed: one for every resumption taken past it —
@@ -109,29 +110,35 @@ fn state(e: i32, s0: i32, p: Program) -> Program {
     Handler::in_place((), move |_, a: i32| pure(a.wrapping_mul(10).wrapping_add(at_end.get())), answer)
         .mine(move |op| matches!(op, Cell::Get(id, _) | Cell::Put(id, _, _) if *id == e))
         .intercept(p)
+        .boxed()
 }
 
 fn throws(e: i32, p: Program) -> Program {
     let on = |op, _| match op {
         Fail::Raise(_, n, _) => pure(-1 - n),
     };
-    Handler::new(pure, on).mine(move |op| matches!(op, Fail::Raise(id, _, _) if *id == e)).intercept(p)
+    Handler::new(pure, on).mine(move |op| matches!(op, Fail::Raise(id, _, _) if *id == e)).intercept(p).boxed()
 }
 
 fn build(t: &Rc<T>) -> Program {
     match &**t {
-        T::Pure(n) => pure(*n),
-        T::Tell(e, n) => { let (e, n) = (*e, *n); perform(move |r| Log::Tell(e, n, r)).map(move |_: ()| n) }
-        T::Get(e) => { let e = *e; perform(move |r| Cell::Get(e, r)) }
-        T::Put(e, n) => { let (e, n) = (*e, *n); perform(move |r| Cell::Put(e, n, r)).map(move |_: ()| n) }
-        T::Among(ns) => Choose::among(ns.clone()),
-        T::Raise(e, n) => { let (e, n) = (*e, *n); perform(move |r| Fail::Raise(e, n, r)) }
-        T::Seq(a, b) => { let b = b.clone(); build(a).then(move || build(&b)) }
-        T::Add(a, b) => { let b = b.clone(); build(a).flat_map(move |i| build(&b).map(move |j| i.wrapping_add(j))) }
+        T::Pure(n) => pure(*n).boxed(),
+        T::Tell(e, n) => { let (e, n) = (*e, *n); perform(move |r| Log::Tell(e, n, r)).map(move |_: ()| n).boxed() }
+        T::Get(e) => { let e = *e; perform(move |r| Cell::Get(e, r)).boxed() }
+        T::Put(e, n) => { let (e, n) = (*e, *n); perform(move |r| Cell::Put(e, n, r)).map(move |_: ()| n).boxed() }
+        T::Among(ns) => Choose::among(ns.clone()).boxed(),
+        T::Raise(e, n) => { let (e, n) = (*e, *n); perform(move |r| Fail::Raise(e, n, r)).boxed() }
+        T::Seq(a, b) => { let b = b.clone(); build(a).then(move || build(&b)).boxed() }
+        T::Add(a, b) => {
+            let b = b.clone();
+            build(a).flat_map(move |i| build(&b).map(move |j| i.wrapping_add(j))).boxed()
+        }
         T::WriterH(e, body) => writer(*e, build(body)),
         T::StateH(e, s0, body) => state(*e, *s0, build(body)),
         T::ThrowsH(e, body) => throws(*e, build(body)),
-        T::ChooseH(body) => Choose::all(build(body)).map(|vs| vs.iter().fold(0i32, |s, v| s.wrapping_add(*v))).embed(),
+        T::ChooseH(body) => {
+            Choose::all(build(body)).map(|vs| vs.iter().fold(0i32, |s, v| s.wrapping_add(*v))).embed().boxed()
+        }
     }
 }
 

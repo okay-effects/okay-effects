@@ -1,10 +1,12 @@
 //! A POOL: memory for the machine's frames, taken from the thread's own lists of free blocks before the system is
-//! asked. A frame lives like a stack entry — made by a bind, let go when its value comes — so the block one frame
-//! leaves is the block the next one takes, and the system's allocator, a third of the machine's time, is not
-//! called. `Shared` is an `Rc` whose memory comes from here; `Owned` is such a `Box`. A continuation's levels and
-//! a value too big to be kept in place (val.rs) are held so too.
+//! asked. A frame lives like a stack entry — made where a value is waited for, let go when it comes — so the block
+//! one frame leaves is the block the next one takes, and the system's allocator is not called. `Shared` is an `Rc`
+//! whose memory comes from here; `Owned` is such a `Box`. A continuation's levels, a value too big to be kept in
+//! place (val.rs) and a computation too big to be (erased.rs) are held so too. Straight-line code takes no memory
+//! at all; where continuations are taken it is worth having: `choose` of examples/bench.rs, the system's allocator
+//! against this, 253 → 185 ns an operation, 11.75 → 3.75 calls of the system.
 //!
-//! The crate's `unsafe` is here and in val.rs. It is sound because:
+//! The crate's `unsafe` is here, in val.rs and in erased.rs. It is sound because:
 //!   * a block of a class is always got from the system with that class's layout and given back to it with the
 //!     same one, whichever way it goes: a free list only holds blocks in between. A block is in a list or in use,
 //!     never both: `take` unlinks it before it is written, `give` is called once, by the last owner's `drop`.
@@ -19,6 +21,8 @@ use std::marker::PhantomData;
 use std::mem::forget;
 use std::ops::Deref;
 use std::ptr::{self, NonNull};
+
+use crate::machine::Frame;
 
 /// a class is a size: a multiple of this, which is also the alignment of every block
 const STEP: usize = 16;
@@ -152,26 +156,26 @@ fn slot<T>(value: T) -> NonNull<Slot<T>> {
 }
 
 /// A head and a function: what a `Shared` can hold with the function's type forgotten.
-pub(crate) struct With<H, F: ?Sized> {
+pub struct With<H, F: ?Sized> {
     pub head: H,
     pub next: F,
 }
 
 /// A value with many owners on one thread, as an `Rc`.
-pub(crate) struct Shared<T: ?Sized> {
+pub struct Shared<T: ?Sized> {
     slot: NonNull<Slot<T>>,
     owns: PhantomData<Slot<T>>,
 }
 
-impl<H, A, B> Shared<With<H, dyn Fn(A) -> B>> {
-    pub(crate) fn new(head: H, next: impl Fn(A) -> B + 'static) -> Self {
+impl<H> Shared<With<H, dyn Frame>> {
+    pub fn new(head: H, next: impl Frame + 'static) -> Self {
         Shared { slot: slot(With { head, next }), owns: PhantomData }
     }
 }
 
 impl<T> Shared<[T]> {
     /// The `len` values of `values`, which gives that many.
-    pub(crate) fn from_exact(len: usize, values: impl Iterator<Item = T>) -> Self {
+    pub fn from_exact(len: usize, values: impl Iterator<Item = T>) -> Self {
         let values_layout = Layout::array::<T>(len).expect("a slice no bigger than memory");
         let (layout, _) = Layout::new::<Cell<usize>>().extend(values_layout).expect("a slice no bigger than memory");
         let memory = take(layout.pad_to_align());
@@ -202,12 +206,12 @@ impl<T: ?Sized> Shared<T> {
     }
 
     /// no other owner
-    pub(crate) fn alone(&self) -> bool {
+    pub fn alone(&self) -> bool {
         self.slot().owners.get() == 1
     }
 
     /// The value, to be written, if this owner is alone.
-    pub(crate) fn get_mut(&mut self) -> Option<&mut T> {
+    pub fn get_mut(&mut self) -> Option<&mut T> {
         // SAFETY: there is no other owner to read it, and this one is borrowed for as long
         self.alone().then(|| unsafe { &mut (*self.slot.as_ptr()).value })
     }
@@ -247,17 +251,17 @@ impl<T: ?Sized> Drop for Shared<T> {
 }
 
 /// A value with one owner, as a `Box`.
-pub(crate) struct Owned<T> {
+pub struct Owned<T> {
     slot: NonNull<Slot<T>>,
     owns: PhantomData<Slot<T>>,
 }
 
 impl<T> Owned<T> {
-    pub(crate) fn new(value: T) -> Self {
+    pub fn new(value: T) -> Self {
         Owned { slot: slot(value), owns: PhantomData }
     }
 
-    pub(crate) fn into_inner(self) -> T {
+    pub fn into_inner(self) -> T {
         // SAFETY: the value is read out once — `self` is forgotten, so it is not dropped — then the memory, taken
         // for this layout, is given back
         let value = unsafe { (&raw const (*self.slot.as_ptr()).value).read() };
@@ -294,6 +298,8 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use crate::machine::{Machine, Node, run};
+    use crate::val::Val;
 
     fn kept(class: usize) -> usize {
         CLASSES_FREE.with(|classes| classes[class].kept.get())
@@ -318,14 +324,31 @@ mod tests {
         assert_eq!((*second, *third, *other_class), ([3; 5], [4; 5], [2; 9]));
     }
 
+    /// a frame that adds what it holds to the value it is given
+    struct Adds(Rc<i32>);
+
+    impl Frame for Adds {
+        fn last(&mut self, x: Val, m: &mut Machine) -> Node {
+            self.again(x, m)
+        }
+
+        fn again(&self, x: Val, _: &mut Machine) -> Node {
+            Node::Done(Val::new(x.take::<i32>() + *self.0))
+        }
+    }
+
+    fn given(frame: &Shared<With<Rc<()>, dyn Frame>>, x: i32) -> i32 {
+        run(|m| frame.next.again(Val::new(x), m)).ok().expect("a value").take()
+    }
+
     #[test]
     fn a_value_is_dropped_once_when_its_last_owner_goes() {
         let held = Rc::new(());
-        let mut one = Shared::new(held.clone(), |x: i32| x + 1);
+        let mut one = Shared::new(held.clone(), Adds(Rc::new(1)));
         assert!(one.alone() && one.get_mut().is_some());
         let two = one.clone();
         assert!(!one.alone() && one.get_mut().is_none());
-        assert_eq!(((one.next)(1), (two.next)(2), Rc::strong_count(&two.head)), (2, 3, 2));
+        assert_eq!((given(&one, 1), given(&two, 2), Rc::strong_count(&two.head)), (2, 3, 2));
         drop(one);
         assert_eq!(Rc::strong_count(&held), 2);
         let mut two = two;
@@ -338,9 +361,8 @@ mod tests {
     #[test]
     fn what_a_function_holds_is_dropped_with_it() {
         let held = Rc::new(5);
-        let holds = held.clone();
-        let shared = Shared::new((), move |x: i32| x + *holds);
-        assert_eq!(((shared.next)(1), Rc::strong_count(&held)), (6, 2));
+        let shared = Shared::new(Rc::new(()), Adds(held.clone()));
+        assert_eq!((given(&shared, 1), Rc::strong_count(&held)), (6, 2));
         drop(shared);
         assert_eq!(Rc::strong_count(&held), 1);
     }
@@ -449,7 +471,7 @@ mod tests {
         let counted = Counted(dropped.clone());
         thread::spawn(move || {
             LATE.with(|late| late.0.set(Some(Shared::from_exact(1, [counted].into_iter()))));
-            drop((Owned::new(1u64), Shared::new((), |x: u8| x)));
+            drop((Owned::new(1u64), Shared::new((), Adds(Rc::new(1)))));
         })
         .join()
         .expect("the thread ends well");

@@ -14,7 +14,7 @@ use okay_effects::json::{Json, Ref};
 use okay_effects::wire::escapes::enc;
 use okay_effects::wire::{Asking, Condition, Failing, Far, Fed, Foreign, Module, Remote, Row, Streaming, Thing};
 use okay_effects::wire::{call, serve};
-use okay_effects::{Comp, Handler, Has, K, defer, pure};
+use okay_effects::{Comp, Dyn, Handler, Has, K, defer, pure};
 
 // -- THE MODULE the worker serves; what it remembers is the worker's, for as long as it lives
 
@@ -30,40 +30,47 @@ fn times(n: i64, x: Json) -> Json {
     }
 }
 
-fn total(items: Vec<Json>, i: usize, sum: i64) -> Comp<Row, Json> {
+fn total(items: Vec<Json>, i: usize, sum: i64) -> Dyn<Row, Json> {
     if i == items.len() {
-        return pure(Json::Int(sum));
+        return pure(Json::Int(sum)).boxed();
     }
-    call("price_of", vec![items[i].clone()]).flat_map(move |price| match price {
-        Json::Int(price) => total(items.clone(), i + 1, sum + price),
-        other => Throws::raise(Condition::new("TypeError", format!("a price: {other}"))),
-    })
+    let price = call("price_of", vec![items[i].clone()]);
+    let priced = move |price| match price {
+        Json::Int(price) => total(items, i + 1, sum + price),
+        other => Throws::raise(Condition::new("TypeError", format!("a price: {other}"))).boxed(),
+    };
+    price.flat_map(priced).boxed()
 }
 
-fn count(n: Json, done: i64) -> Comp<Row, Json> {
-    if n == Json::Int(done) { pure(n) } else { call("tick", vec![]).then(move || count(n.clone(), done + 1)) }
+fn count(n: Json, done: i64) -> Dyn<Row, Json> {
+    if n == Json::Int(done) {
+        return pure(n).boxed();
+    }
+    call("tick", vec![]).then(move || count(n, done + 1)).boxed()
 }
 
 /// each value is counted when it has gone out, not while the function waits for credit
-fn numbers(next: i64, last: i64, sent: Rc<Cell<i64>>) -> Comp<Row, Json> {
+fn numbers(next: i64, last: i64, sent: Rc<Cell<i64>>) -> Dyn<Row, Json> {
     if next > last {
-        return pure(Json::Null);
+        return pure(Json::Null).boxed();
     }
-    Emit::send(Json::Int(next)).then(move || {
+    let counted = move || {
         sent.set(sent.get() + 1);
-        numbers(next + 1, last, sent.clone())
-    })
+        numbers(next + 1, last, sent)
+    };
+    Emit::send(Json::Int(next)).then(counted).boxed()
 }
 
-fn dedup(seen: Rc<Vec<Json>>) -> Comp<Row, Json> {
-    Fed::next().flat_map(move |value| match value {
-        None => pure(Json::Null),
-        Some(value) if seen.contains(&value) => dedup(seen.clone()),
+fn dedup(seen: Rc<Vec<Json>>) -> Dyn<Row, Json> {
+    let fed = move |value| match value {
+        None => pure(Json::Null).boxed(),
+        Some(value) if seen.contains(&value) => dedup(seen),
         Some(value) => {
             let seen = Rc::new([seen.as_slice(), std::slice::from_ref(&value)].concat());
-            Emit::send(value).then(move || dedup(seen.clone()))
+            Emit::send(value).then(move || dedup(seen)).boxed()
         }
-    })
+    };
+    Fed::next().flat_map(fed).boxed()
 }
 
 struct Counter {
@@ -87,9 +94,13 @@ impl Thing for Counter {
 }
 
 /// a function of the module, from its cases; any other arguments are refused by name
-fn function(module: &mut Module, name: &'static str, cases: impl Fn(&[Json]) -> Option<Comp<Row, Json>> + 'static) {
-    let refused = move || Throws::raise(Condition::new("TypeError", format!("{name}: not its arguments")));
-    module.functions.insert(name, Box::new(move |args| cases(args).unwrap_or_else(refused)));
+fn function<P: Comp<Row, Json>>(
+    module: &mut Module,
+    name: &'static str,
+    cases: impl Fn(&[Json]) -> Option<P> + 'static,
+) {
+    let refused = move || Throws::raise(Condition::new("TypeError", format!("{name}: not its arguments"))).boxed();
+    module.functions.insert(name, Box::new(move |args| cases(args).map_or_else(refused, Comp::boxed)));
 }
 
 fn module() -> Module {
@@ -169,17 +180,15 @@ fn module() -> Module {
 // -- THE HOST
 
 /// This side's answers: every choice taken, a price looked up, a tick counted.
-fn answered<R: Has<Foreign, I>, I>(p: Comp<R, Json>) -> Comp<R::Rest, Vec<Json>> {
+fn answered<R: Has<Foreign, I>, I>(p: impl Comp<R, Json>) -> impl Comp<R::Rest, Vec<Json>> {
     let on = |op, k: K<R::Rest, Vec<Json>>| match op {
         Foreign::Call(name, args, r) => match (name.as_str(), args.as_slice()) {
-            ("choose", [Json::Arr(values)]) => values.iter().fold(pure(Vec::new()), |found, x| {
+            ("choose", [Json::Arr(values)]) => values.iter().fold(pure(Vec::new()).boxed(), |found, x| {
                 let (k, x) = (k.clone(), x.clone());
-                found.flat_map(move |found: Vec<Json>| {
-                    k.resume(r, x.clone()).map(move |more| [found.clone(), more].concat())
-                })
+                found.flat_map(move |found: Vec<Json>| k.resume(r, x).map(move |more| [found, more].concat())).boxed()
             }),
-            ("price_of", [Json::Str(item)]) => k.resume(r, Json::Int(if item == "tea" { 3 } else { 2 })),
-            ("tick", _) => k.resume(r, Json::Null),
+            ("price_of", [Json::Str(item)]) => k.resume(r, Json::Int(if item == "tea" { 3 } else { 2 })).boxed(),
+            ("tick", _) => k.resume(r, Json::Null).boxed(),
             (name, _) => panic!("no answer for {name}"),
         },
     };
@@ -187,18 +196,18 @@ fn answered<R: Has<Foreign, I>, I>(p: Comp<R, Json>) -> Comp<R::Rest, Vec<Json>>
 }
 
 /// the program's value on a far side, or the far side's failure
-fn on<A: Display + 'static>(far: &Remote, p: Comp<Failing, A>) -> String {
+fn on<A: Display + 'static>(far: &Remote, p: impl Comp<Failing, A>) -> String {
     match far.run(Throws::run(p)) {
         Ok(value) => value.to_string(),
         Err(Condition { kind, message }) => format!("{kind}: {message}"),
     }
 }
 
-fn all(p: Comp<Asking, Json>) -> Comp<Failing, Json> {
+fn all(p: impl Comp<Asking, Json>) -> impl Comp<Failing, Json> {
     answered(p).map(Json::Arr)
 }
 
-fn sent(p: Comp<Streaming, ()>) -> Comp<Failing, Json> {
+fn sent(p: impl Comp<Streaming, ()>) -> impl Comp<Failing, Json> {
     Emit::collect(p).map(|(values, _)| Json::Arr(values))
 }
 
@@ -234,7 +243,10 @@ fn script(command: &[String]) -> Result<Vec<String>, Condition> {
     lines.push(format!("condition {}", on(&far, Far::call("t:boom", vec![]))));
     let a = Json::obj([("a", Json::Int(1))]);
     let odd = vec![Json::Int(9007199254740993), Json::Dec(f64::NAN), Json::Dec(3.0), Json::Dec(0.5), a];
-    let shape = |value: Json| enc(&value).map_or_else(Throws::raise, pure);
+    let shape = |value: Json| match enc(&value) {
+        Ok(shape) => pure(shape).boxed(),
+        Err(c) => Throws::raise(c).boxed(),
+    };
     lines.push(format!("escapes {}", on(&far, Far::call("t:echo", vec![Json::Arr(odd)]).flat_map(shape))));
 
     lines.push(format!("stream {}", on(&far, sent(Far::stream("t:numbers", ints(&[5]), 2, None)))));

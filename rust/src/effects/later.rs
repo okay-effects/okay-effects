@@ -19,14 +19,14 @@ pub enum Async {
 
 impl Async {
     /// The answer `register` will be called back with.
-    pub fn wait<X: 'static, R: Has<Self, I>, I>(register: impl FnOnce(Resume<X>) + 'static) -> Comp<R, X> {
+    pub fn wait<X: 'static, R: Has<Self, I>, I>(register: impl FnOnce(Resume<X>) + 'static) -> impl Comp<R, X> {
         let erased = move |resume: Resume<Box<dyn Any>>| register(Rc::new(move |x| resume(Box::new(x))));
         perform(|r| Async::Await(Box::new(erased), r))
             .map(|x: Box<dyn Any>| *x.downcast().expect("the answer of the type that was awaited"))
     }
 
     /// The program started; `done` is called with its value, now or later. Returns as soon as the program waits.
-    pub fn start<A: 'static>(p: Comp<row![Async], A>, done: impl Fn(A) + 'static) {
+    pub fn start<A: 'static>(p: impl Comp<row![Async], A>, done: impl Fn(A) + 'static) {
         let turns = Rc::new(Turns::default());
         let next = turns.clone();
         let ret = move |a| {
@@ -48,9 +48,9 @@ impl Async {
 
     /// Both programs at once; their values when both have come.
     pub fn both<A: 'static, B: 'static, R: Has<Self, I>, I>(
-        a: Comp<row![Async], A>,
-        b: Comp<row![Async], B>,
-    ) -> Comp<R, (A, B)> {
+        a: impl Comp<row![Async], A>,
+        b: impl Comp<row![Async], B>,
+    ) -> impl Comp<R, (A, B)> {
         Async::wait(move |resume: Resume<(A, B)>| {
             let values: Rc<(RefCell<Option<A>>, RefCell<Option<B>>)> = Rc::default();
             let give = move |values: &(RefCell<Option<A>>, RefCell<Option<B>>)| {
@@ -71,7 +71,7 @@ impl Async {
     }
 
     /// All the programs at once; their values, in the programs' order.
-    pub fn all<A: 'static, R: Has<Self, I>, I>(ps: Vec<Comp<row![Async], A>>) -> Comp<R, Vec<A>> {
+    pub fn all<A: 'static, R: Has<Self, I>, I>(ps: Vec<impl Comp<row![Async], A>>) -> impl Comp<R, Vec<A>> {
         Async::wait(move |resume: Resume<Vec<A>>| {
             let values: Rc<RefCell<Vec<Option<A>>>> = Rc::new(RefCell::new(ps.iter().map(|_| None).collect()));
             let give = move |values: &RefCell<Vec<Option<A>>>| {
@@ -91,7 +91,10 @@ impl Async {
     }
 
     /// Both programs at once; the value that comes first — the other's is dropped.
-    pub fn race<A: 'static, R: Has<Self, I>, I>(a: Comp<row![Async], A>, b: Comp<row![Async], A>) -> Comp<R, A> {
+    pub fn race<A: 'static, R: Has<Self, I>, I>(
+        a: impl Comp<row![Async], A>,
+        b: impl Comp<row![Async], A>,
+    ) -> impl Comp<R, A> {
         Async::wait(move |resume: Resume<A>| {
             let won = Rc::new(Cell::new(false));
             let first = move |x| {
@@ -147,7 +150,7 @@ impl Timers {
         self.0.borrow().now
     }
 
-    pub fn sleep<R: Has<Async, I>, I>(&self, millis: u64) -> Comp<R, ()> {
+    pub fn sleep<R: Has<Async, I>, I>(&self, millis: u64) -> impl Comp<R, ()> + use<R, I> {
         let timers = self.clone();
         Async::wait(move |resume: Resume<()>| {
             let mut waiting = timers.0.borrow_mut();

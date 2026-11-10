@@ -30,7 +30,7 @@ pub enum Foreign {
     Call(String, Vec<Json>, Reply<Json>),
 }
 
-pub fn call<R: Has<Foreign, I>, I>(name: &str, args: Vec<Json>) -> Comp<R, Json> {
+pub fn call<R: Has<Foreign, I>, I>(name: &str, args: Vec<Json>) -> impl Comp<R, Json> + use<R, I> {
     perform(|r| Foreign::Call(name.to_string(), args, r))
 }
 
