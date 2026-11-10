@@ -10,7 +10,7 @@ public final class K<B, R> {
 
   /** the rest resumed with the answer; the operation is the witness of the answer's type:
    * {@code case Among<X> among -> k.resume(among, among.values().get(0))} */
-  public <X> Comp<B, R> resume(Op<?, X> op, X answer) {
+  public <X> Comp<B, R> resume(Op<?, X, ?> op, X answer) {
     if (op != asked) throw new IllegalArgumentException("not the operation asked: " + op);
     return new Comp.Resume<>(pieces, answer);
   }

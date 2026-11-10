@@ -114,7 +114,7 @@ final class Properties {
   }
 
   sealed interface Account {}
-  record Deposit(int amount) implements Account, Op<Account, Integer> {}
+  record Deposit(int amount) implements Account, Op<Account, Integer, Deposit> {}
 
   /** an account kept in a state: the handler of one effect asks the operations of another, the next in the row */
   static <A, R extends Eff<State<Integer>, ?>> Comp<A, R> onState(Comp<A, ? super Eff<Account, R>> p) {

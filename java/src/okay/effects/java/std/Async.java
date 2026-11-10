@@ -22,7 +22,7 @@ import okay.effects.java.Op;
  * keeps the rest of the program and returns. The callback, whenever and on whatever thread it is called, resumes
  * the rest. No threads are held waiting: asynchrony is callbacks and continuations, nothing else. */
 public sealed interface Async {
-  record Await<X>(Consumer<Consumer<X>> register) implements Async, Op<Async, X> {}
+  record Await<X>(Consumer<Consumer<X>> register) implements Async, Op<Async, X, Await<X>> {}
 
   /** the answer {@code register} will be called back with */
   static <X> Comp<X, Eff<Async, ?>> await(Consumer<Consumer<X>> register) {

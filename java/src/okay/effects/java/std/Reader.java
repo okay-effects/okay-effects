@@ -13,7 +13,7 @@ import okay.effects.java.Op;
 
 /** READER: a value of the surroundings. */
 public sealed interface Reader<V> {
-  record Ask<V>() implements Reader<V>, Op<Reader<V>, V> {}
+  record Ask<V>() implements Reader<V>, Op<Reader<V>, V, Ask<V>> {}
 
   static <V> Comp<V, Eff<Reader<V>, ?>> ask() { return perform(new Ask<>()); }
 

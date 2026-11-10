@@ -20,16 +20,16 @@ import okay.effects.java.std.Throws;
  * side's failure is raised, and a handler of {@code Throws<Condition>} decides what it means. */
 public sealed interface Far {
   /** a request sent, not waited for: the number its answer will carry */
-  record Send(String op, Json.Obj fields) implements Far, Op<Far, Long> {}
+  record Send(String op, Json.Obj fields) implements Far, Op<Far, Long, Send> {}
   /** the answer to a request, waited for: {@code ok}'s value, or the far side's condition */
-  record Receive(long id) implements Far, Op<Far, Throws.Result<Condition, Json>> {}
+  record Receive(long id) implements Far, Op<Far, Throws.Result<Condition, Json>, Receive> {}
   /** the number of a new run: its continuations are forgotten when the program ends */
-  record Run() implements Far, Op<Far, Long> {}
+  record Run() implements Far, Op<Far, Long, Run> {}
   /** a call opened as a stream, with the values this side feeds it, if any: the stream's number */
   record Open(String fn, List<Json> args, int credit, Optional<Iterator<Json>> input)
-      implements Far, Op<Far, Throws.Result<Condition, Long>> {}
+      implements Far, Op<Far, Throws.Result<Condition, Long>, Open> {}
   /** the stream's next chunk, waited for and paid back with a credit; none at its end */
-  record Pull(long stream) implements Far, Op<Far, Throws.Result<Condition, Optional<Json>>> {}
+  record Pull(long stream) implements Far, Op<Far, Throws.Result<Condition, Optional<Json>>, Pull> {}
 
   private static <A> Comp<A, Eff<Throws<Condition>, ?>> orRaise(Throws.Result<Condition, A> answer) {
     return switch (answer) {

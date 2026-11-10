@@ -445,7 +445,7 @@ public final class Worker {
   }
 
   /** the rest of the program, given the answer of the operation it asked */
-  private static <X> Comp<Json, Row> resume(Step.Asked<?, Json, Row> asked, Op<?, X> op, X answer) {
+  private static <X> Comp<Json, Row> resume(Step.Asked<?, Json, Row> asked, Op<?, X, ?> op, X answer) {
     if (op != asked.op()) throw new IllegalArgumentException("not the operation asked: " + op);
     @SuppressWarnings("unchecked") // the operation is the witness: the rest takes the answer of the operation asked
     Function<X, Comp<Json, Row>> rest = (Function<X, Comp<Json, Row>>) asked.k();

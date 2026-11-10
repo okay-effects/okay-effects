@@ -21,7 +21,7 @@ import okay.effects.java.Op;
  * a list, a loop, another stream, a lazy sequence pulled a value at a time — is the handler's choice. A handler
  * that makes a stream of a stream sends to the stream next in the row. */
 public sealed interface Emit<T> {
-  record Send<T>(T value) implements Emit<T>, Op<Emit<T>, Void> {}
+  record Send<T>(T value) implements Emit<T>, Op<Emit<T>, Void, Send<T>> {}
 
   static <T> Comp<Void, Eff<Emit<T>, ?>> send(T value) { return perform(new Send<>(value)); }
 

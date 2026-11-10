@@ -10,8 +10,13 @@ public final class Effects {
   public static <A, R> Comp<A, R> pure(A a) { return new Comp.Done<>(a); }
 
   /** an operation asked: its effect is the first of the row, whatever the rest. It goes to the handler of the
-   * row's first effect: the nearest one put by {@code handle}. */
-  public static <E, X> Comp<X, Eff<E, ?>> perform(Op<E, X> op) { return new Comp.Ask<>(op, 0); }
+   * row's first effect: the nearest one put by {@code handle}. The operation's class {@code O} must be of the
+   * effect it names: it names as itself a class above {@code O}, and that class is an {@code E} ({@link Op}).
+   * Written {@code ? super O}, for javac refuses {@code Op<E, X, O>} here: it cannot see that {@code O} is an
+   * {@code E}, and a type variable's bound cannot say both. */
+  public static <E, X, O extends Op<E, X, ? super O>> Comp<X, Eff<E, ?>> perform(O op) {
+    return new Comp.Ask<>(op, 0);
+  }
 
   /** the computation, under one more handler: its effects are one step further — and so its operations go, each
    * one handler further out than it would */
@@ -51,8 +56,8 @@ public final class Effects {
 
   /** the operations of {@code F}, the first effect of the program's row, answered by {@code h}: all those the row
    * sends here, and no other. {@code F} leaves the row: {@code R} is what is under it. An operation finds this
-   * handler by its place in the row; {@code effect}, the class of the operations of {@code F}, is only checked
-   * (under {@code java -ea}). */
+   * handler by its place in the row; {@code effect}, the class of the operations of {@code F}, only names the
+   * effect: the machine does not test it, for the types say every operation that comes here is an {@code F}. */
   public static <F, A, B, R> Comp<B, R> handle(
       Class<? super F> effect, Handler<F, A, B, R> h, Comp<A, ? super Eff<F, R>> p) {
     return new Comp.Handle<>(Machine.Mark.handler(effect, h, null, true), null, p);

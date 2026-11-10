@@ -81,7 +81,8 @@ final class Machine {
           if (found < 0) return new Step.Asked(ask.op, take(frames, mark, state, below, -1));
           Level at = level(below, found);
           Mark handler = found == 0 ? mark : at.mark;
-          assert handler.effect.isInstance(op) : op; // the row sent it here: the types say it is of the effect
+          // The handler takes `op` as its effect: a cast, with no test. It holds by the types: the row sent the
+          // operation to the handler of the effect E it names, and `perform` took it only as a class that is an E.
           if (handler.inPlace != null) {
             cell.value = found == 0 ? state : at.state;
             cell.asked = op;

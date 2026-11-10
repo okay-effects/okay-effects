@@ -4,6 +4,6 @@ package okay.effects.java;
  * the row was not told the truth — by a cast. */
 public final class NoHandler extends RuntimeException {
   private static final long serialVersionUID = 1L;
-  public final transient Op<?, ?> op;
-  public NoHandler(Op<?, ?> op) { super("an operation with no handler: " + op); this.op = op; }
+  public final transient Op<?, ?, ?> op;
+  public NoHandler(Op<?, ?, ?> op) { super("an operation with no handler: " + op); this.op = op; }
 }

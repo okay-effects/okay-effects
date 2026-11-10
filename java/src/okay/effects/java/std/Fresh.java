@@ -10,7 +10,7 @@ import okay.effects.java.Op;
 
 /** FRESH: a number never given before, in this run. */
 public sealed interface Fresh {
-  record Next() implements Fresh, Op<Fresh, Long> {}
+  record Next() implements Fresh, Op<Fresh, Long, Next> {}
 
   static Comp<Long, Eff<Fresh, ?>> fresh() { return perform(new Next()); }
 

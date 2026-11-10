@@ -52,12 +52,12 @@ final class Tck {
 
   // the effects: an identity `e` in the operation — a handler answers its own (`mine`), any other passes outside
   sealed interface Log {}
-  record TellOp(int e, int n) implements Log, Op<Log, Void> {}
+  record TellOp(int e, int n) implements Log, Op<Log, Void, TellOp> {}
   sealed interface Store {}
-  record GetOp(int e) implements Store, Op<Store, Integer> {}
-  record PutOp(int e, int n) implements Store, Op<Store, Void> {}
+  record GetOp(int e) implements Store, Op<Store, Integer, GetOp> {}
+  record PutOp(int e, int n) implements Store, Op<Store, Void, PutOp> {}
   sealed interface Fail {}
-  record RaiseOp(int e, int n) implements Fail, Op<Fail, Integer> {}
+  record RaiseOp(int e, int n) implements Fail, Op<Fail, Integer, RaiseOp> {}
 
   /** THE ROW of every program: the four effects stay in it whatever handlers the program is under — a handler
    * here is an interceptor: it answers its own operations, found by their class, and lets the others pass. Named,

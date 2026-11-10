@@ -11,7 +11,7 @@ import okay.effects.java.Op;
 
 /** WRITER: values told, collected in order. */
 public sealed interface Writer<W> {
-  record Tell<W>(W value) implements Writer<W>, Op<Writer<W>, Void> {}
+  record Tell<W>(W value) implements Writer<W>, Op<Writer<W>, Void, Tell<W>> {}
 
   static <W> Comp<Void, Eff<Writer<W>, ?>> tell(W w) { return perform(new Tell<>(w)); }
 

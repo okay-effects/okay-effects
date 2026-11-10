@@ -12,7 +12,7 @@ import okay.effects.java.Op;
 /** THROWS: the rest of the program is dropped. */
 public sealed interface Throws<E> {
   /** answered by nothing: by an {@code X} of any type, for there will be none */
-  record Raise<E, X>(E error) implements Throws<E>, Op<Throws<E>, X> {}
+  record Raise<E, X>(E error) implements Throws<E>, Op<Throws<E>, X, Raise<E, X>> {}
 
   static <E, X> Comp<X, Eff<Throws<E>, ?>> raise(E error) { return perform(new Raise<>(error)); }
 

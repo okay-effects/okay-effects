@@ -11,8 +11,8 @@ import okay.effects.java.Op;
 
 /** STATE. An effect is a sealed family of operations — data; each says what answers it. */
 public sealed interface State<S> {
-  record Get<S>() implements State<S>, Op<State<S>, S> {}
-  record Put<S>(S value) implements State<S>, Op<State<S>, Void> {}
+  record Get<S>() implements State<S>, Op<State<S>, S, Get<S>> {}
+  record Put<S>(S value) implements State<S>, Op<State<S>, Void, Put<S>> {}
 
   static <S> Comp<S, Eff<State<S>, ?>> get() { return perform(new Get<>()); }
   static <S> Comp<Void, Eff<State<S>, ?>> put(S s) { return perform(new Put<>(s)); }

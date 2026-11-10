@@ -11,7 +11,7 @@ import okay.effects.java.Op;
 
 /** CLOCK: the time, in milliseconds — the system's, or one a test sets. */
 public sealed interface Clock {
-  record Now() implements Clock, Op<Clock, Long> {}
+  record Now() implements Clock, Op<Clock, Long, Now> {}
 
   static Comp<Long, Eff<Clock, ?>> now() { return perform(new Now()); }
 

@@ -15,9 +15,9 @@ public abstract sealed class Comp<A, R> {
 
   /** a question: an operation, to be answered by the handler `skip` row levels past the nearest */
   static final class Ask<X, R> extends Comp<X, R> {
-    final Op<?, X> op;
+    final Op<?, X, ?> op;
     final int skip;
-    Ask(Op<?, X> op, int skip) { this.op = op; this.skip = skip; }
+    Ask(Op<?, X, ?> op, int skip) { this.op = op; this.skip = skip; }
   }
 
   /** a computation, and what follows its value; the rows of the two were checked where they were bound */

@@ -10,7 +10,7 @@ import okay.effects.java.Op;
  * runs in one process, in one language; its handlers may be in another. Only this data crosses — a continuation
  * stays where it was made, known outside by a number. The messages are the okay wire's (wire/README.md). */
 public sealed interface Foreign {
-  record Call(String name, List<Json> args) implements Foreign, Op<Foreign, Json> {}
+  record Call(String name, List<Json> args) implements Foreign, Op<Foreign, Json, Call> {}
 
   static Comp<Json, Eff<Foreign, ?>> call(String name, Json... args) {
     return Effects.perform(new Call(name, List.of(args)));

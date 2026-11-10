@@ -16,7 +16,7 @@ public final class Cell<S> {
   private static final Answered ANSWERED = new Answered();
 
   /** the operation is the witness of the answer's type: a {@code Get<S>} is answered by an {@code S} */
-  public <X> Answered answer(Op<?, X> op, X x) {
+  public <X> Answered answer(Op<?, X, ?> op, X x) {
     if (op != asked) throw new IllegalArgumentException("not the operation asked: " + op);
     answer = x;
     return ANSWERED;

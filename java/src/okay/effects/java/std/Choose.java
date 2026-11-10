@@ -13,7 +13,7 @@ import okay.effects.java.Op;
 
 /** CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times. */
 public sealed interface Choose {
-  record Among<X>(List<X> values) implements Choose, Op<Choose, X> {}
+  record Among<X>(List<X> values) implements Choose, Op<Choose, X, Among<X>> {}
 
   static <X> Comp<X, Eff<Choose, ?>> among(List<X> values) { return perform(new Among<>(values)); }
 
