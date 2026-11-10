@@ -2,138 +2,122 @@ package okay.effects.scala.std
 
 import okay.effects.scala.*
 
-/** STATE. An effect is a sealed family of operations — data; each says what answers it. */
-sealed trait State[S]
-object State:
-  final case class Get[S]() extends State[S], Op[State[S], S]
-  final case class Put[S](s: S) extends State[S], Op[State[S], Unit]
+/*
+ * THE STANDARD EFFECTS: each an enum of its operations — data; each says what answers it — its words, its
+ * handlers. A word finds its row from the evidence in scope — `def tick[R[_]: Has[State % Int]]` lets `State.get`
+ * and `State.put(n)` say nothing more — or from what is expected.
+ */
 
-  def get[S]: S ! State[S] = perform(Get[S]())
-  def put[S](s: S): Unit ! State[S] = perform(Put(s))
-  def modify[S](f: S => S): Unit ! State[S] = get[S].flatMap(s => put(f(s)))
+/** STATE of type `S`, read and written. */
+enum State[S, X]:
+  case Get[S]() extends State[S, S]
+  case Put[S](s: S) extends State[S, Unit]
+
+object State:
+  def get[S, R[_]](using In[State % S, R]): S ! R = perform[State % S](Get())
+  def put[S, R[_]](s: S)(using In[State % S, R]): Unit ! R = perform[State % S](Put(s))
+  def modify[S, R[_]](f: S => S)(using In[State % S, R]): Unit ! R = get[S, R].flatMap(s => put(f(s)))
 
   /** the state kept by the handler, answered in place; each path of the program has its own */
-  def run[S, A, R](s0: S)(p: A ! (State[S] & R)): (S, A) ! R =
-    handle(new InPlace[State[S], S, A, (S, A), R]:
-      def ret(s: S, a: A) = pure((s, a))
-      def answer[X](state: Cell[S], op: State[S] & Op[State[S], X]): X = op match
-        case Get() => state.value
-        case Put(s) => state.value = s
-    , s0)(p)
+  def run[S, R[_], Rest[_], A](init: S)(p: A ! R)(using Split[State % S, R, Rest]): (S, A) ! Rest =
+    handle(p, Handler.stateful[State % S, Rest, A, (S, A), S](init)((s, a) => pure((s, a)))(
+      [X] => (op: State[S, X], cell: Cell[S]) => op match
+        case Get() => cell.get
+        case Put(s) => cell.set(s)))
 
 /** READER: a value of the surroundings. */
-sealed trait Reader[V]
+enum Reader[V, X]:
+  case Ask[V]() extends Reader[V, V]
+
 object Reader:
-  final case class Ask[V]() extends Reader[V], Op[Reader[V], V]
+  def ask[V, R[_]](using In[Reader % V, R]): V ! R = perform[Reader % V](Ask())
 
-  def ask[V]: V ! Reader[V] = perform(Ask[V]())
-
-  def run[V, A, R](value: V)(p: A ! (Reader[V] & R)): A ! R =
-    handle(new InPlace[Reader[V], Unit, A, A, R]:
-      def ret(state: Unit, a: A) = pure(a)
-      def answer[X](state: Cell[Unit], op: Reader[V] & Op[Reader[V], X]): X = op match
-        case Ask() => value
-    , ())(p)
+  def run[V, R[_], Rest[_], A](value: V)(p: A ! R)(using Split[Reader % V, R, Rest]): A ! Rest =
+    handle(p, Handler.tail[Reader % V, Rest, A, A](pure)([X] => (op: Reader[V, X]) => op match
+      case Ask() => value))
 
   /** the program, its asks answered by the reader outside, through `f`: an interceptor */
-  def local[V, A, R <: Reader[V]](f: V => V)(p: A ! R): A ! R =
-    intercept(new Handler[Reader[V], A, A, R]:
-      def ret(a: A) = pure(a)
-      def on[X](op: Reader[V] & Op[Reader[V], X], k: X => A ! R) = op match
-        case Ask() => ask[V].flatMap(v => k(f(v)))
-    )(p)
+  def local[V, R[_], A](f: V => V)(p: A ! R)(using In[Reader % V, R]): A ! R =
+    intercept(p, Handler.general[Reader % V, R, A, A](pure)([X] => (op: Reader[V, X], k: X => A ! R) => op match
+      case Ask() => ask[V, R].flatMap(v => k(f(v)))))
 
 /** WRITER: values told, collected in order. */
-sealed trait Writer[W]
+enum Writer[W, X]:
+  case Tell[W](w: W) extends Writer[W, Unit]
+
 object Writer:
-  final case class Tell[W](w: W) extends Writer[W], Op[Writer[W], Unit]
+  def tell[W, R[_]](w: W)(using In[Writer % W, R]): Unit ! R = perform[Writer % W](Tell(w))
 
-  def tell[W](w: W): Unit ! Writer[W] = perform(Tell(w))
-
-  def run[W, A, R](p: A ! (Writer[W] & R)): (List[W], A) ! R =
-    handle(new InPlace[Writer[W], List[W], A, (List[W], A), R]:
-      def ret(told: List[W], a: A) = pure((told.reverse, a))
-      def answer[X](told: Cell[List[W]], op: Writer[W] & Op[Writer[W], X]): X = op match
-        case Tell(w) => told.value = w :: told.value
-    , Nil)(p)
+  def run[W, R[_], Rest[_], A](p: A ! R)(using Split[Writer % W, R, Rest]): (List[W], A) ! Rest =
+    handle(p, Handler.stateful[Writer % W, Rest, A, (List[W], A), List[W]](Nil)((told, a) => pure((told.reverse, a)))(
+      [X] => (op: Writer[W, X], told: Cell[List[W]]) => op match
+        case Tell(w) => told.set(w :: told.get)))
 
 /** THROWS: the rest of the program is dropped. */
-sealed trait Throws[E]
+enum Throws[E, X]:
+  case Raise[E](error: E) extends Throws[E, Nothing]
+
 object Throws:
-  final case class Raise[E](error: E) extends Throws[E], Op[Throws[E], Nothing]
+  def raise[E, R[_]](error: E)(using In[Throws % E, R]): Nothing ! R = perform[Throws % E](Raise(error))
 
-  def raise[E](error: E): Nothing ! Throws[E] = perform(Raise(error))
-
-  def run[E, A, R](p: A ! (Throws[E] & R)): Either[E, A] ! R =
-    handle(new Handler[Throws[E], A, Either[E, A], R]:
-      def ret(a: A) = pure(Right(a))
-      def on[X](op: Throws[E] & Op[Throws[E], X], k: X => Either[E, A] ! R) = op match
-        case Raise(error) => pure(Left(error))
-    )(p)
+  def run[E, R[_], Rest[_], A](p: A ! R)(using Split[Throws % E, R, Rest]): Either[E, A] ! Rest =
+    handle(p, Handler.abort[Throws % E, Rest, A, Either[E, A]](a => pure(Right(a)))(
+      [X] => (op: Throws[E, X]) => op match
+        case Raise(error) => pure(Left(error))))
 
   /** the program, or what `rescue` makes of its failure */
-  def recover[E, A, R](rescue: E => A ! R)(p: A ! (Throws[E] & R)): A ! R =
-    handle(new Handler[Throws[E], A, A, R]:
-      def ret(a: A) = pure(a)
-      def on[X](op: Throws[E] & Op[Throws[E], X], k: X => A ! R) = op match
-        case Raise(error) => rescue(error)
-    )(p)
+  def recover[E, R[_], Rest[_], A](rescue: E => A ! Rest)(p: A ! R)(using Split[Throws % E, R, Rest]): A ! Rest =
+    handle(p, Handler.abort[Throws % E, Rest, A, A](pure)([X] => (op: Throws[E, X]) => op match
+      case Raise(error) => rescue(error)))
 
 /** CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times. */
-sealed trait Choose
-object Choose:
-  final case class Among[X](xs: List[X]) extends Choose, Op[Choose, X]
+enum Choose[X]:
+  case Among[X](xs: List[X]) extends Choose[X]
 
-  def among[X](xs: X*): X ! Choose = perform(Among(xs.toList))
+object Choose:
+  def among[X, R[_]](xs: X*)(using In[Choose, R]): X ! R = perform[Choose](Among(xs.toList))
   /** no value: this path ends */
-  def none: Nothing ! Choose = perform(Among(Nil))
+  def none[R[_]](using In[Choose, R]): Nothing ! R = perform[Choose](Among(Nil))
 
   /** every value the program comes to */
-  def all[A, R](p: A ! (Choose & R)): List[A] ! R =
-    handle(new Handler[Choose, A, List[A], R]:
-      def ret(a: A) = pure(List(a))
-      def on[X](op: Choose & Op[Choose, X], k: X => List[A] ! R) = op match
-        case Among(xs) => xs.foldLeft(pure(Nil): List[A] ! R)((all, x) => all.flatMap(as => k(x).map(as ++ _)))
-    )(p)
+  def all[R[_], Rest[_], A](p: A ! R)(using Split[Choose, R, Rest]): List[A] ! Rest =
+    handle(p, Handler.general[Choose, Rest, A, List[A]](a => pure(List(a)))(
+      [X] => (op: Choose[X], k: X => List[A] ! Rest) => op match
+        case Among(xs) =>
+          xs.foldLeft(pure[List[A], Rest](Nil))((all, x) => all.flatMap(as => k(x).map(as ++ _)))))
 
   /** the first value the program comes to, the other paths not taken */
-  def first[A, R](p: A ! (Choose & R)): Option[A] ! R =
-    handle(new Handler[Choose, A, Option[A], R]:
-      def ret(a: A) = pure(Some(a))
-      def on[X](op: Choose & Op[Choose, X], k: X => Option[A] ! R) = op match
+  def first[R[_], Rest[_], A](p: A ! R)(using Split[Choose, R, Rest]): Option[A] ! Rest =
+    handle(p, Handler.general[Choose, Rest, A, Option[A]](a => pure(Some(a)))(
+      [X] => (op: Choose[X], k: X => Option[A] ! Rest) => op match
         case Among(xs) =>
-          def from(left: List[X]): Option[A] ! R = left match
+          def from(left: List[X]): Option[A] ! Rest = left match
             case Nil => pure(None)
             case x :: rest => k(x).flatMap(found => if found.isDefined then pure(found) else from(rest))
-          from(xs)
-    )(p)
+          from(xs)))
 
 /** FRESH: a number never given before, in this run. */
-sealed trait Fresh
+enum Fresh[X]:
+  case Next extends Fresh[Long]
+
 object Fresh:
-  case object Next extends Fresh, Op[Fresh, Long]
+  def fresh[R[_]](using In[Fresh, R]): Long ! R = perform[Fresh](Next)
 
-  def fresh: Long ! Fresh = perform(Next)
-
-  def run[A, R](p: A ! (Fresh & R)): A ! R =
-    handle(new InPlace[Fresh, Long, A, A, R]:
-      def ret(next: Long, a: A) = pure(a)
-      def answer[X](next: Cell[Long], op: Fresh & Op[Fresh, X]): X = op match
-        case Next => next.value += 1; next.value - 1
-    , 0L)(p)
+  def run[R[_], Rest[_], A](p: A ! R)(using Split[Fresh, R, Rest]): A ! Rest =
+    handle(p, Handler.stateful[Fresh, Rest, A, A, Long](0L)((_, a) => pure(a))(
+      [X] => (op: Fresh[X], next: Cell[Long]) => op match
+        case Next => next.set(next.get + 1); next.get - 1))
 
 /** CLOCK: the time, in milliseconds — the system's, or one a test sets. */
-sealed trait Clock
+enum Clock[X]:
+  case Now extends Clock[Long]
+
 object Clock:
-  case object Now extends Clock, Op[Clock, Long]
+  def now[R[_]](using In[Clock, R]): Long ! R = perform[Clock](Now)
 
-  def now: Long ! Clock = perform(Now)
+  def system[R[_], Rest[_], A](p: A ! R)(using Split[Clock, R, Rest]): A ! Rest =
+    at(() => System.currentTimeMillis())(p)
 
-  def system[A, R](p: A ! (Clock & R)): A ! R = at(() => System.currentTimeMillis())(p)
-
-  def at[A, R](time: () => Long)(p: A ! (Clock & R)): A ! R =
-    handle(new InPlace[Clock, Unit, A, A, R]:
-      def ret(state: Unit, a: A) = pure(a)
-      def answer[X](state: Cell[Unit], op: Clock & Op[Clock, X]): X = op match
-        case Now => time()
-    , ())(p)
+  def at[R[_], Rest[_], A](time: () => Long)(p: A ! R)(using Split[Clock, R, Rest]): A ! Rest =
+    handle(p, Handler.tail[Clock, Rest, A, A](pure)([X] => (op: Clock[X]) => op match
+      case Now => time()))

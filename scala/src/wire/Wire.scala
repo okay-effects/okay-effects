@@ -9,12 +9,14 @@ import java.util.zip.{Deflater, Inflater}
 /** THE OPERATION THAT CROSSES a process: a name and arguments in JSON, answered in JSON. A program written over it
  * runs in one process, in one language; its handlers may be in another. Only this data crosses — a continuation
  * stays where it was made, known outside by a number. The messages are the okay wire's (wire/README.md). */
-sealed trait Foreign
-final case class Call(name: String, args: List[Json]) extends Foreign, Op[Foreign, Json]
+enum Foreign[X]:
+  case Call(name: String, args: List[Json]) extends Foreign[Json]
 
-def call(name: String, args: Json*): Json ! Foreign = perform(Call(name, args.toList))
+export Foreign.Call
 
-/** A failure that crosses, by name: raised on one side, handled on the other (`Throws[Condition]`). */
+def call[R[_]](name: String, args: Json*)(using In[Foreign, R]): Json ! R = perform[Foreign](Call(name, args.toList))
+
+/** A failure that crosses, by name: raised on one side, handled on the other (`Throws % Condition`). */
 final case class Condition(kind: String, message: String) extends RuntimeException(s"$kind: $message")
 
 val Shim = 9L

@@ -11,6 +11,11 @@ import scala.jdk.CollectionConverters.*
 /** The wire: its codecs against their specifications' own examples, a worker against the transcripts of `wire/`,
  * and a host with a worker — in one process and in two — against `wire/expected.txt`. */
 class WireTests extends munit.FunSuite:
+  import Far.Failing
+
+  /** the row of a far stream taken here */
+  type Streaming[X] = (Failing + Emit % Json)[X]
+
   private val wire: Path = List("../wire", "wire").map(Paths.get(_)).find(Files.isDirectory(_)).get
 
   private def bytes(hex: String): Array[Byte] = hex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
@@ -176,33 +181,33 @@ class WireTests extends munit.FunSuite:
       worker.start()
       val remote = Remote(Channels.newInputStream(back.source), Channels.newOutputStream(there.sink), cbor, deflate)
       try
-        assertEquals(remote.run(Throws.run(Far.call("t:echo", odd))).map(_.toString), Right(odd.toString))
+        assertEquals(remote.run(Throws.run(Far.call[Failing]("t:echo", odd))).map(_.toString), Right(odd.toString))
         val big = Json.Str("x" * 100000)
-        assertEquals(remote.run(Throws.run(Far.call("t:echo", big))), Right(big))
+        assertEquals(remote.run(Throws.run(Far.call[Failing]("t:echo", big))), Right(big))
       finally remote.close()
 
   test("a far failure is raised here, and a handler of this side decides"):
     val remote = far()
     try
-      val rescued = Throws.recover[Condition, Json, Far](c => pure(Json.Str(c.kind)))(Far.call("t:boom"))
+      val rescued = Throws.recover((c: Condition) => pure[Json, Far](Json.Str(c.kind)))(Far.call[Failing]("t:boom"))
       assertEquals(remote.run(rescued), Json.Str("ValueError"))
-      assertEquals(remote.run(Throws.run(Far.call("t:nothing"))).left.map(_.kind), Left("LookupError"))
+      assertEquals(remote.run(Throws.run(Far.call[Failing]("t:nothing"))).left.map(_.kind), Left("LookupError"))
       // the far side lives on
-      assertEquals(remote.run(Throws.run(Far.call("t:add", Json.Int(2), Json.Int(3)))), Right(Json.Int(5)))
+      assertEquals(remote.run(Throws.run(Far.call[Failing]("t:add", Json.Int(2), Json.Int(3)))), Right(Json.Int(5)))
     finally remote.close()
 
   test("mux: an answer that comes later, on another thread, does not hold the next"):
     val module = Worker.Module(Map(
-      "slow" -> (_ => Async.sleep(100).map(_ => Json.Str("slow"))),
+      "slow" -> (_ => Async.sleep[Worker.Row](100).map(_ => Json.Str("slow"))),
       "fast" -> (_ => pure(Json.Str("fast")))))
     val remote = far(module)
     try
       val order = remote.run(Throws.run(
         for
-          slow <- Far.start("slow")
-          fast <- Far.start("fast")
-          first <- Far.result(fast)
-          second <- Far.result(slow)
+          slow <- Far.start[Failing]("slow")
+          fast <- Far.start[Failing]("fast")
+          first <- Far.result[Failing](fast)
+          second <- Far.result[Failing](slow)
         yield List(first, second)))
       assertEquals(order, Right(List(Json.Str("fast"), Json.Str("slow"))))
     finally remote.close()
@@ -211,32 +216,32 @@ class WireTests extends munit.FunSuite:
     val remote = far()
     try
       for credit <- List(1, 3, 10) do
-        val taken = Emit.take[Json, Unit, Far.Failing](4)(Far.stream("t:numbers", List(Json.Int(1000)), credit))
+        val taken = Emit.take(4)(Far.stream[Streaming]("t:numbers", List(Json.Int(1000)), credit))
         assertEquals(remote.run(Throws.run(Emit.collect(taken))).map(_._1.length), Right(4))
-        assertEquals(remote.run(Throws.run(Far.call("t:sent"))), Right(Json.Int(4L + credit)))
-      val all = Emit.collect(Far.stream("t:numbers", List(Json.Int(50000)), credit = 64))
+        assertEquals(remote.run(Throws.run(Far.call[Failing]("t:sent"))), Right(Json.Int(4L + credit)))
+      val all = Emit.collect(Far.stream[Streaming]("t:numbers", List(Json.Int(50000)), credit = 64))
       assertEquals(remote.run(Throws.run(all)).map(_._1.length), Right(50000))
-      val fed = Emit.sendAll(Iterator.from(0).take(20000).map(i => Json.Int(i % 1000)))
-      val distinct = Emit.collect(Far.stream("t:dedup", Nil, credit = 2, input = Some(fed)))
+      val fed = Emit.sendAll[Json, Emit % Json](Iterator.from(0).take(20000).map(i => Json.Int(i % 1000)))
+      val distinct = Emit.collect(Far.stream[Streaming]("t:dedup", Nil, credit = 2, input = Some(fed)))
       assertEquals(remote.run(Throws.run(distinct)).map(_._1), Right(List.tabulate(1000)(i => Json.Int(i))))
     finally remote.close()
 
   test("a stream that fails ends with its condition; a far side with no mux has no streams"):
     val remote = far()
     try
-      val failed = remote.run(Throws.run(Emit.collect(Far.stream("t:boom", Nil, credit = 1))))
+      val failed = remote.run(Throws.run(Emit.collect(Far.stream[Streaming]("t:boom", Nil, credit = 1))))
       assertEquals(failed, Left(Condition("ValueError", "no")))
     finally remote.close()
     val old = Remote(ByteArrayInputStream("""{"shim":9,"speaks":{"format":["json"]}}""".getBytes(UTF_8)),
       ByteArrayOutputStream())
-    val refused = old.run(Throws.run(Emit.collect(Far.stream("t:numbers", List(Json.Int(1)), credit = 1))))
+    val refused = old.run(Throws.run(Emit.collect(Far.stream[Streaming]("t:numbers", List(Json.Int(1)), credit = 1))))
     assertEquals(refused.left.map(_.kind), Left("NotStreaming"))
     // and when the far side is gone, that is a failure too
-    assertEquals(old.run(Throws.run(Far.call("t:add"))).left.map(_.kind), Left("WorkerDied"))
+    assertEquals(old.run(Throws.run(Far.call[Failing]("t:add"))).left.map(_.kind), Left("WorkerDied"))
 
   test("auth: the same secret on both sides, or the wire is refused by name"):
     val proven = far(secret = Some("s"), proving = Some("s"))
-    try assertEquals(proven.run(Throws.run(Far.call("t:add", Json.Int(2), Json.Int(3)))), Right(Json.Int(5)))
+    try assertEquals(proven.run(Throws.run(Far.call[Failing]("t:add", Json.Int(2), Json.Int(3)))), Right(Json.Int(5)))
     finally proven.close()
     assertEquals(intercept[Condition](far(secret = Some("s"), proving = Some("another"))).kind, "PermissionError")
     assertEquals(intercept[Condition](far(secret = Some("s"), proving = None)).kind, "PermissionError")

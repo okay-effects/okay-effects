@@ -6,12 +6,12 @@ import java.io.{IOException, InputStream, OutputStream}
 import scala.collection.mutable
 
 /** THE STREAM A CALLER FEEDS into a function of the far side: the function takes a value at a time. */
-sealed trait Fed
-object Fed:
-  case object Next extends Fed, Op[Fed, Option[Json]]
+enum Fed[X]:
+  case Next extends Fed[Option[Json]]
 
+object Fed:
   /** the caller's next value, waited for; none at the stream's end */
-  def next: Option[Json] ! Fed = perform(Next)
+  def next[R[_]](using In[Fed, R]): Option[Json] ! R = perform[Fed](Next)
 
 /** THE FAR SIDE: a module served to a host, over the wire. Every function is a program, and what it asks decides
  * what crosses:
@@ -24,7 +24,7 @@ object Fed:
  *
  * A program that waits is a continuation kept: no thread waits with it. */
 object Worker:
-  type Row = Foreign & Emit[Json] & Fed & Async & Throws[Condition]
+  type Row[X] = (Foreign + Emit % Json + Fed + Async + Throws % Condition)[X]
   type Function = List[Json] => Json ! Row
 
   /** An object kept for the host: its methods and attributes, by name. */
@@ -282,38 +282,62 @@ private final class Worker(module: Worker.Module, link: Link, secret: Option[Str
       close(out)
       link.send(Json.obj("stream" -> Json.Int(out.id), "end" -> Json.Bool(true)))
       None
-    case (Step.Asked(Throws.Raise(c: Condition), _), _) =>
+    // an operation: which effect's it is, its place in the row says
+    case (asked: Step.Asked[Row, ?, ?, Json], _) =>
+      asked.of[Throws % Condition].map(the => raised(task, the.op))
+        .orElse(asked.of[Foreign].map(the => called(task, the.op, the.k)))
+        .orElse(asked.of[Emit % Json].map(the => sent(task, the.op, the.k)))
+        .orElse(asked.of[Fed].map(the => fed(task, the.op, the.k)))
+        .orElse(asked.of[Async].map(the => awaited(task, the.op, the.k)))
+        .get // the row has these five effects and no other
+
+  private def raised[X](task: Task, op: Throws[Condition, X]): Option[Json ! Row] = op match
+    case Throws.Raise(c) =>
       fail(task, c)
       None
-    case (Step.Asked(Call(name, args), k), Task.Program(id, run)) =>
-      counter += 1
-      kept((run, counter)) = k
-      reply(id, ok(Json.obj("perform" -> Json.Str(name), "args" -> Json.Arr(args.map(Escapes.enc)),
-        "k" -> Json.Int(counter))))
-      None
-    case (Step.Asked(Emit.Send(value: Json), k), Task.Stream(out)) =>
-      if out.credit > 0 then
-        out.credit -= 1
-        link.send(Json.obj("stream" -> Json.Int(out.id), "chunk" -> Escapes.enc(value)))
-        Some(k(()))
-      else
-        out.waiting = Some(() => advance(task, Emit.send(value).flatMap(k)))
+
+  private def called[X](task: Task, op: Foreign[X], k: X => Json ! Row): Option[Json ! Row] = op match
+    case Call(name, args) => task match
+      case Task.Program(id, run) =>
+        counter += 1
+        kept((run, counter)) = k
+        reply(id, ok(Json.obj("perform" -> Json.Str(name), "args" -> Json.Arr(args.map(Escapes.enc)),
+          "k" -> Json.Int(counter))))
         None
-    case (Step.Asked(Fed.Next, k), Task.Stream(out)) if out.input.isDefined =>
-      val in = out.input.get
-      if in.values.nonEmpty then
-        // taken: the host may send one more
-        link.send(Json.obj("stream" -> Json.Int(in.id), "credit" -> Json.Int(1)))
-        Some(k(Some(in.values.dequeue())))
-      else if in.ended then Some(k(None))
-      else
-        in.waiting = Some(() => advance(task, Fed.next.flatMap(k)))
-        None
-    case (Step.Asked(Fed.Next, k), _) => Some(k(None))
-    case (Step.Asked(Async.Await(register), k), _) =>
+      case _ => nothing(op)
+
+  private def sent[X](task: Task, op: Emit[Json, X], k: X => Json ! Row): Option[Json ! Row] = op match
+    case Emit.Send(value) => task match
+      case Task.Stream(out) =>
+        if out.credit > 0 then
+          out.credit -= 1
+          link.send(Json.obj("stream" -> Json.Int(out.id), "chunk" -> Escapes.enc(value)))
+          Some(k(()))
+        else
+          out.waiting = Some(() => advance(task, Emit.send[Json, Row](value).flatMap(k)))
+          None
+      case _ => nothing(op)
+
+  private def fed[X](task: Task, op: Fed[X], k: X => Json ! Row): Option[Json ! Row] = op match
+    case Fed.Next => task match
+      case Task.Stream(out) if out.input.isDefined =>
+        val in = out.input.get
+        if in.values.nonEmpty then
+          // taken: the host may send one more
+          link.send(Json.obj("stream" -> Json.Int(in.id), "credit" -> Json.Int(1)))
+          Some(k(Some(in.values.dequeue())))
+        else if in.ended then Some(k(None))
+        else
+          in.waiting = Some(() => advance(task, Fed.next[Row].flatMap(k)))
+          None
+      case _ => Some(k(None))
+
+  private def awaited[X](task: Task, op: Async[X], k: X => Json ! Row): Option[Json ! Row] = op match
+    case Async.Await(register) =>
       register(x => synchronized(advance(task, k(x))))
       None
-    case (Step.Asked(op, _), _) => throw Condition("LookupError", s"nothing here answers $op")
+
+  private def nothing(op: Any): Nothing = throw Condition("LookupError", s"nothing here answers $op")
 
   private def fail(task: Task, c: Condition): Unit = task match
     case Task.Value(id, _) => reply(id, failed(c))

@@ -8,67 +8,74 @@ import scala.collection.mutable
 /** A FAR SIDE, as an effect: what a program of this side asks of it. The operations are the wire's moves and
  * nothing more; calls, objects, programs and streams are programs over them (below), and `Remote.run` is their
  * handler — the only place where bytes move. */
-sealed trait Far
-object Far:
+enum Far[X]:
   /** a request sent, not waited for: the number its answer will carry */
-  final case class Send(op: String, fields: List[(String, Json)]) extends Far, Op[Far, Long]
+  case Send(op: String, fields: List[(String, Json)]) extends Far[Long]
   /** the answer to a request, waited for: `ok`'s value, or the far side's condition */
-  final case class Receive(id: Long) extends Far, Op[Far, Either[Condition, Json]]
+  case Receive(id: Long) extends Far[Either[Condition, Json]]
   /** the number of a new run: its continuations are forgotten when the program ends */
-  case object Run extends Far, Op[Far, Long]
+  case Run extends Far[Long]
   /** a call opened as a stream, with the values this side feeds it, if any: the stream's number */
-  final case class Open(fn: String, args: List[Json], credit: Int, input: Option[LazyList[Json]])
-      extends Far, Op[Far, Either[Condition, Long]]
+  case Open(fn: String, args: List[Json], credit: Int, input: Option[LazyList[Json]])
+      extends Far[Either[Condition, Long]]
   /** the stream's next chunk, waited for and paid back with a credit; none at its end */
-  final case class Pull(stream: Long) extends Far, Op[Far, Either[Condition, Option[Json]]]
+  case Pull(stream: Long) extends Far[Either[Condition, Option[Json]]]
 
-  /** a far side's failure is raised here: a handler of `Throws[Condition]` decides what it means */
-  type Failing = Far & Throws[Condition]
+object Far:
+  /** a far side's failure is raised here: a handler of `Throws % Condition` decides what it means */
+  type Failing[X] = (Far + Throws % Condition)[X]
 
-  private def orRaise[A](answer: Either[Condition, A]): A ! Throws[Condition] = answer.fold(Throws.raise, pure)
+  private def orRaise[A, R[_]: Has[Throws % Condition]](answer: Either[Condition, A]): A ! R =
+    answer.fold(Throws.raise, pure)
 
-  private def ask(op: String, fields: (String, Json)*): Json ! Failing =
-    perform(Send(op, fields.toList)).flatMap(id => perform(Receive(id))).flatMap(orRaise)
+  private def ask[R[_]: Has[Far] : Has[Throws % Condition]](op: String, fields: (String, Json)*): Json ! R =
+    perform[Far](Send(op, fields.toList)).flatMap(id => perform[Far](Receive(id))).flatMap(orRaise)
 
   private def arguments(args: Seq[Json]): (String, Json) = "args" -> Json.Arr(args.toList.map(Escapes.enc))
 
   /** the far function's answer */
-  def call(fn: String, args: Json*): Json ! Failing = start(fn, args*).flatMap(result)
+  def call[R[_]: Has[Far] : Has[Throws % Condition]](fn: String, args: Json*): Json ! R =
+    start(fn, args*).flatMap(result)
 
   /** a call begun and not waited for: on a far side that speaks `mux`, others may be answered before it */
-  def start(fn: String, args: Json*): Long ! Far = perform(Send("call", List("fn" -> Json.Str(fn), arguments(args))))
+  def start[R[_]: Has[Far]](fn: String, args: Json*): Long ! R =
+    perform[Far](Send("call", List("fn" -> Json.Str(fn), arguments(args))))
 
   /** the answer of a call begun */
-  def result(id: Long): Json ! Failing = perform(Receive(id)).flatMap(orRaise).map(Escapes.dec)
+  def result[R[_]: Has[Far] : Has[Throws % Condition]](id: Long): Json ! R =
+    perform[Far](Receive(id)).flatMap(orRaise).map(Escapes.dec)
 
   /** the far function's answer kept on the far side: a ref to it */
-  def hold(fn: String, args: Json*): Json.Ref ! Failing =
+  def hold[R[_]: Has[Far] : Has[Throws % Condition]](fn: String, args: Json*): Json.Ref ! R =
     ask("call", "fn" -> Json.Str(fn), arguments(args), "held" -> Json.Bool(true)).map(Escapes.dec).flatMap:
       case ref: Json.Ref => pure(ref)
       case other => Throws.raise(Condition("WireError", s"a ref was expected: $other"))
 
   /** a method of an object held */
-  def method(ref: Json.Ref, name: String, args: Json*): Json ! Failing =
+  def method[R[_]: Has[Far] : Has[Throws % Condition]](ref: Json.Ref, name: String, args: Json*)
+      : Json ! R =
     ask("call", "fn" -> Json.obj("ref" -> Json.Int(ref.id), "method" -> Json.Str(name)), arguments(args))
       .map(Escapes.dec)
 
   /** an attribute of an object held */
-  def attr(ref: Json.Ref, name: String): Json ! Failing =
+  def attr[R[_]: Has[Far] : Has[Throws % Condition]](ref: Json.Ref, name: String): Json ! R =
     ask("call", "fn" -> Json.obj("ref" -> Json.Int(ref.id), "attr" -> Json.Str(name)), arguments(Nil))
       .map(Escapes.dec)
 
   /** what the ref names is dropped on the far side */
-  def release(ref: Json.Ref): Unit ! Failing = ask("release", "ref" -> Json.Int(ref.id)).map(_ => ())
+  def release[R[_]: Has[Far] : Has[Throws % Condition]](ref: Json.Ref): Unit ! R =
+    ask("release", "ref" -> Json.Int(ref.id)).map(_ => ())
 
   /** THE FAR PROGRAM `fn`, as a program of this side: what it asks is asked here as a `Call`, and answered by this
    * side's handlers — once, many times, or never. `callbacks` names what this side offers, for a far side that
    * checks. */
-  def program(fn: String, args: List[Json], callbacks: List[String] = Nil): Json ! (Failing & Foreign) =
-    perform(Run).flatMap: number =>
+  def program[R[_]: Has[Far] : Has[Throws % Condition] : Has[Foreign]](fn: String, args: List[Json],
+      callbacks: List[String] = Nil): Json ! R =
+    perform[Far](Run).flatMap: number =>
       val run = "run" -> Json.Int(number)
-      def node(ok: Json): Json ! (Failing & Foreign) = ok("perform") match
+      def node(ok: Json): Json ! R = ok("perform") match
         case Json.Str(name) =>
-          perform(Call(name, Escapes.items(ok("args")).map(Escapes.dec)))
+          perform[Foreign](Call(name, Escapes.items(ok("args")).map(Escapes.dec)))
             .flatMap(answer => ask("continue", run, "k" -> ok("k"), "answer" -> Escapes.enc(answer)))
             .flatMap(node)
         case _ => pure(Escapes.dec(ok("done")))
@@ -78,14 +85,14 @@ object Far:
   /** THE FAR FUNCTION'S STREAM, as a stream of this side: it sends what the far side sends. The far side runs at
    * most `credit` chunks ahead of whoever takes them here. With an `input`, that stream is fed to the far function,
    * under the far side's credit, while this one is pulled. */
-  def stream(fn: String, args: List[Json], credit: Int, input: Option[Unit ! Emit[Json]] = None)
-      : Unit ! (Failing & Emit[Json]) =
-    defer(perform(Open(fn, args.map(Escapes.enc), credit, input.map(Emit.pull(_).map(Escapes.enc))))).flatMap(orRaise)
-      .flatMap: stream =>
-        def rest: Unit ! (Failing & Emit[Json]) = perform(Pull(stream)).flatMap(orRaise).flatMap:
-          case Some(chunk) => Emit.send(Escapes.dec(chunk)).flatMap(_ => rest)
-          case None => pure(())
-        rest
+  def stream[R[_]: Has[Far] : Has[Throws % Condition] : Has[Emit % Json]](fn: String, args: List[Json],
+      credit: Int, input: Option[Unit ! Emit % Json] = None): Unit ! R =
+    def fed = input.map(Emit.pull(_).map(Escapes.enc))
+    defer(perform[Far](Open(fn, args.map(Escapes.enc), credit, fed))).flatMap(orRaise).flatMap: stream =>
+      def rest: Unit ! R = perform[Far](Pull(stream)).flatMap(orRaise).flatMap:
+        case Some(chunk) => Emit.send(Escapes.dec(chunk)).flatMap(_ => rest)
+        case None => unit
+      rest
 
 /** THE HOST'S END of a wire to a far side. Opening it is the handshake: the far side's hello, the proof of the
  * `secret` if there is one, and `configure` when CBOR or DEFLATE is asked for; each mismatch is refused by name. */
@@ -216,21 +223,19 @@ final class Remote(in: InputStream, out: OutputStream, cbor: Boolean = false, de
   /** THE PROGRAM RUN to its value, its far operations done on this wire. When it ends, what it left open on the far
    * side is closed: its runs forgotten, its streams cancelled. Refs live on, until released. */
   def run[A](p: A ! Far): A =
-    val handler = new InPlace[Far, Unit, A, A, Any]:
-      def ret(state: Unit, a: A) = pure(a)
-      def answer[X](state: Cell[Unit], op: Far & Op[Far, X]): X = op match
-        case Far.Send(name, fields) =>
-          val id = send(name, fields*)
-          awaited += id
-          id
-        case Far.Receive(id) => receive(id)
-        case Far.Run =>
-          numbers += 1
-          runs += numbers
-          numbers
-        case call: Far.Open => open(call)
-        case Far.Pull(stream) => pull(stream)
-    try okay.effects.scala.run(handle(handler, ())(p))
+    val handler = Handler.tail[Far, Pure, A, A](pure)([X] => (op: Far[X]) => op match
+      case Far.Send(name, fields) =>
+        val id = send(name, fields*)
+        awaited += id
+        id
+      case Far.Receive(id) => receive(id)
+      case Far.Run =>
+        numbers += 1
+        runs += numbers
+        numbers
+      case call: Far.Open => open(call)
+      case Far.Pull(stream) => pull(stream))
+    try okay.effects.scala.run(handle(p, handler))
     finally
       streams.keys.foreach(stream => send("cancel", "stream" -> Json.Int(stream)))
       runs.foreach(run => send("forget", "run" -> Json.Int(run)))

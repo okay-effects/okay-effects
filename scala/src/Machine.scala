@@ -8,21 +8,34 @@ import scala.annotation.tailrec
  *   Bind       a frame is pushed on the top level
  *   Done       the top frame takes the value; no frame left — the handler's `ret`, and the level is popped
  *   Handle     a new level
- *   Ask        the nearest handler of the operation is found. In place: it answers, the loop goes on — nothing is
- *              allocated but the answer. General: the levels above and at the handler are taken off as `k`, and
- *              the clause runs below them
+ *   Ask        the handler of the operation's place is found. In place: it answers, the loop goes on with the
+ *              answer — nothing is allocated. General: the levels above and at the handler are taken off as `k`,
+ *              and the clause runs below them
  *   Resume     the levels of a `k` are put back on top
+ *
+ * HOW A HANDLER IS FOUND: by the operation's place in the row, a number the compiler found (Rows.scala) — no class
+ * is looked at. Walking down the levels, the place is this level's handler's, or the search goes on; past a handler
+ * put by `handle`, which took its effect out of the row, the places after its own are one less. An interceptor
+ * keeps its effect in the row, and changes no place.
  *
  * Levels and frames are immutable: a `k` is shared, never copied, and may be resumed any number of times. Types
  * are checked at the kernel's surface (Effects.scala); in here values are `Any`, and the casts say so. */
 private[scala] object Machine:
-  type Node = Comp[Nothing, Any]
+  /** in here a row and an effect are any: the surface has checked them */
+  type Any1[X] = Any
+  type Node = Comp[Any1, Any]
 
-  final class Mark(effect: Class[?], general0: Handler[?, ?, ?, ?] | Null, inPlace0: InPlace[?, ?, ?, ?, ?] | Null):
-    val general = general0.asInstanceOf[Handler[Any, Any, Any, Any] | Null]
-    val inPlace = inPlace0.asInstanceOf[InPlace[Any, Any, Any, Any, Any] | Null]
-    def accepts(op: Any): Boolean =
-      effect.isInstance(op) && (if general != null then general.mine(op) else inPlace.nn.mine(op))
+  /** A handler on its level: the place it answers, and whether it took its effect out of the row (`handle`) or
+   * left it there (`intercept`). The casts forget the handler's types, which `handle` has checked. */
+  final class Mark(val place: Int, val takes: Boolean, handler: Handler[?, ?, ?, ?]):
+    val general = handler match
+      case general: Handler.General[?, ?, ?, ?] => general.asInstanceOf[Handler.General[Any1, Any1, Any, Any]]
+      case _ => null
+    val inPlace = handler match
+      case inPlace: Handler.Stateful[?, ?, ?, ?, ?] =>
+        inPlace.asInstanceOf[Handler.Stateful[Any1, Any1, Any, Any, Any]]
+      case _ => null
+    def init: Any = if inPlace != null then inPlace.init else null
 
   /** what follows a value, inside one level */
   final class Frames(val next: Any => Node, val rest: Frames | Null)
@@ -32,52 +45,60 @@ private[scala] object Machine:
 
   /** the levels of a continuation, the lowest first */
   final class Pieces(val frames: Frames | Null, val mark: Mark | Null, val state: Any, val above: Pieces | Null)
-      extends (Any => Comp[Any, Any]):
-    def apply(x: Any): Comp[Any, Any] = new Comp.Resume(this, x)
+      extends (Any => Node):
+    def apply(x: Any): Node = new Comp.Resume(this, x)
 
-  val unit: Comp[Any, Unit] = new Comp.Done(())
+  /** the two casts of a run: into the machine, where types are forgotten, and out of it */
+  def run[R[_], A](p: Comp[R, A]): Step[R, A] =
+    loop(p.asInstanceOf[Node], null, null, null, null, null, new Cell[Any](null)).asInstanceOf[Step[R, A]]
 
-  def run[E, A](p: Comp[E, A]): Step[E, A] =
-    loop(p.asInstanceOf[Node], null, null, null, null, new Cell[Any](null)).asInstanceOf[Step[E, A]]
-
+  /** One turn takes the computation `c` apart; or, when there is none, gives the value `x` to what waits for it.
+   * So an answer in place and a `k` resumed go on as values: no `Done` is made for them. */
   @tailrec
-  private def loop(c: Node, frames: Frames | Null, mark: Mark | Null, state: Any, below: Level | Null,
-      cell: Cell[Any]): Step[Nothing, Any] = c match
-    case bind: Comp.Bind[?, ?, ?] =>
-      loop(bind.first, new Frames(bind.next.asInstanceOf[Any => Node], frames), mark, state, below, cell)
-    case done: Comp.Done[?] =>
-      if frames != null then loop(frames.next(done.value), frames.rest, mark, state, below, cell)
+  private def loop(c: Node | Null, x: Any, frames: Frames | Null, mark: Mark | Null, state: Any,
+      below: Level | Null, cell: Cell[Any]): Step[Any1, Any] = c match
+    case null =>
+      if frames != null then loop(frames.next(x), null, frames.rest, mark, state, below, cell)
       else if mark != null then
-        val after = returned(mark, state, done.value)
-        if below == null then loop(after, null, null, null, null, cell)
-        else loop(after, below.frames, below.mark, below.state, below.below, cell)
-      else if below != null then loop(done, below.frames, below.mark, below.state, below.below, cell)
-      else Step.Done(done.value)
-    case ask: Comp.Ask[?, ?] =>
-      if mark != null && mark.inPlace != null && mark.accepts(ask.op) then
-        cell.value = state
-        val answer = mark.inPlace.nn.answer(cell, ask.op.asInstanceOf[Op[Any, Any]])
-        loop(new Comp.Done(answer), frames, mark, cell.value, below, cell)
+        val after = returned(mark, state, x)
+        if below == null then loop(after, null, null, null, null, null, cell)
+        else loop(after, null, below.frames, below.mark, below.state, below.below, cell)
+      else if below != null then loop(null, x, below.frames, below.mark, below.state, below.below, cell)
+      else Step.Done(x)
+    case bind: Comp.Bind[Any1, ?, Any] =>
+      loop(bind.first, null, new Frames(bind.next.asInstanceOf[Any => Node], frames), mark, state, below, cell)
+    case done: Comp.Done[Any1, Any] =>
+      // the first line of `case null`, here too: the common case in one turn
+      if frames != null then loop(frames.next(done.value), null, frames.rest, mark, state, below, cell)
+      else loop(null, done.value, null, mark, state, below, cell)
+    case ask: Comp.Ask[Any1, ?, ?] =>
+      val place = numberOf(ask.at)
+      if mark != null && mark.inPlace != null && mark.place == place then
+        cell.state = state
+        val answer = mark.inPlace.nn.answer[Any](ask.op, cell)
+        loop(null, answer, frames, mark, cell.state, below, cell)
       else
-        val found = find(ask.op, mark, below)
-        if found < 0 then Step.Asked(ask.op.asInstanceOf[Op[Nothing, Any]], take(frames, mark, state, below, -1))
+        val found = find(place, mark, below, 0)
+        if found < 0 then Step.Asked[Any1, Any1, Any, Any](placeAt(-1 - found), ask.op,
+          take(frames, mark, state, below, -1))
         else
           val at = level(below, found)
           val handler = if found == 0 then mark.nn else at.nn.mark.nn
           if handler.inPlace != null then
-            cell.value = at.nn.state
-            val answer = handler.inPlace.nn.answer(cell, ask.op.asInstanceOf[Op[Any, Any]])
-            loop(new Comp.Done(answer), frames, mark, state, replace(below, found, cell.value), cell)
+            cell.state = at.nn.state
+            val answer = handler.inPlace.nn.answer[Any](ask.op, cell)
+            loop(null, answer, frames, mark, state, replace(below, found, cell.state), cell)
           else
             val k = take(frames, mark, state, below, found)
             val under = if found == 0 then below else at.nn.below
-            val clause = handler.general.nn.on(ask.op.asInstanceOf[Op[Any, Any]], k).asInstanceOf[Node]
-            if under == null then loop(clause, null, null, null, null, cell)
-            else loop(clause, under.frames, under.mark, under.state, under.below, cell)
-    case handle: Comp.Handle[?, ?] =>
-      loop(handle.body.asInstanceOf[Node], null, handle.mark, handle.state, new Level(frames, mark, state, below),
-        cell)
-    case resume: Comp.Resume[?, ?] =>
+            val clause = handler.general.nn.on[Any](ask.op, k)
+            if under == null then loop(clause, null, null, null, null, null, cell)
+            else loop(clause, null, under.frames, under.mark, under.state, under.below, cell)
+    case handle: Comp.Handle[Any1, Any] =>
+      // a cast: the body is of another row, the one with the handler's effect
+      loop(handle.body.asInstanceOf[Node], null, null, handle.mark, handle.mark.init,
+        new Level(frames, mark, state, below), cell)
+    case resume: Comp.Resume[Any1, Any] =>
       val empty = frames == null && mark == null && below == null
       var under = if empty then null else new Level(frames, mark, state, below)
       var piece = resume.k
@@ -85,21 +106,19 @@ private[scala] object Machine:
         if piece.frames != null || piece.mark != null then
           under = new Level(piece.frames, piece.mark, piece.state, under)
         piece = piece.above.nn
-      loop(new Comp.Done(resume.x), piece.frames, piece.mark, piece.state, under, cell)
+      loop(null, resume.x, piece.frames, piece.mark, piece.state, under, cell)
 
   private def returned(mark: Mark, state: Any, value: Any): Node =
-    (if mark.general != null then mark.general.nn.ret(value) else mark.inPlace.nn.ret(state, value)).asInstanceOf[Node]
+    if mark.general != null then mark.general.nn.ret(value) else mark.inPlace.nn.ret(state, value)
 
-  /** how many levels down the operation's handler is: 0 the top level, 1 the first below; -1 when there is none */
-  private def find(op: Any, mark: Mark | Null, below: Level | Null): Int =
-    if mark != null && mark.accepts(op) then 0
+  /** how many levels down from `mark`'s the handler of `place` is, counted from `depth`; with no handler,
+   * -1 - the place in the row of the whole run */
+  @tailrec
+  private def find(place: Int, mark: Mark | Null, below: Level | Null, depth: Int): Int =
+    if mark != null && mark.place == place then depth
     else
-      var depth = 1
-      var at = below
-      while at != null && !(at.mark != null && at.mark.nn.accepts(op)) do
-        at = at.below
-        depth += 1
-      if at == null then -1 else depth
+      val outside = if mark != null && mark.takes && place > mark.place then place - 1 else place
+      if below == null then -1 - outside else find(outside, below.mark, below.below, depth + 1)
 
   /** the level `depth` down; null for the top one, which is not packed */
   private def level(below: Level | Null, depth: Int): Level | Null =
