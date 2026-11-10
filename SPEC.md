@@ -1,8 +1,8 @@
 # The model
 
 What the three kernels of this repository implement, in the order one would implement it in a fourth language.
-The notation is neutral. The reference for every rule is `scala/src/Machine.scala` (the machine),
-`scala/src/Effects.scala` (the typed surface) and `scala/src/Rows.scala` (the rows).
+The notation is neutral. The reference is the Scala kernel: `scala/src/Machine.scala` (the machine; §2 says how it
+writes the stack), `scala/src/Effects.scala` (the typed surface) and `scala/src/Rows.scala` (the rows).
 
 ## 1. Terms
 
@@ -34,11 +34,19 @@ Step A  =  Done a | Asked op k
 `pure a = Done a`, `perform op = Ask op`, `c >>= f = Bind c f`, `defer p = Bind (Done ()) (\_ -> p)`,
 `handle h c = Handle (mark of h) s0 c`, and `k x = Resume k x`. Building any of these runs nothing.
 
-Levels and frames are never written after they are made. A continuation shares them with the stack it was taken
-from. (Rust, with no collector, writes a frame or a state only while nothing else holds it, and copies a state
-shared with a `k` before writing it. Its `Bind` is a struct composed by the compiler: a frame is made only where
-what follows must wait as a value — at an operation answered generally, a handler, a boxed computation, a resumed
-`k`.)
+Frames are never written after they are made, and neither is a level that a continuation holds. In Java no level
+is written, and a continuation shares its levels with the stack it was taken from. In Scala a level on the stack is
+the cell of its handler's state, written in place; a level taken into a `k` is off the stack and is not written
+again, and resuming `k` makes new levels from the ones it holds, each with the state as taken. (Rust, with no
+collector, writes a frame or a state only while nothing else holds it, and copies a state shared with a `k` before
+writing it. Its `Bind` is a struct composed by the compiler: a frame is made only where what follows must wait as a
+value — at an operation answered generally, a handler, a boxed computation, a resumed `k`.)
+
+The Scala machine writes this stack typed, and nothing in it is cast. The frames of the top are an argument of the
+loop; a level holds its handler, its state, and the frames and the level outside it. A level says the row inside it
+and the value its body comes to; frames say the value they take and the one they come to; a `k` says the answer it
+waits for, and the row and the value it is resumed in. A level is a handler's, a renaming level (§7), or the bottom
+of the run: above the bottom no level is empty, so what §3 says of popping or dropping an empty level does not arise.
 
 ## 3. The machine
 
@@ -62,16 +70,16 @@ Details the table leaves out:
 
 - **Nearest.** The top level is asked first, then each level below. A mark *accepts* `op` when its handler is one
   the row gives `op`. §7 says what the model requires of this, and how each kernel decides it.
-- **A state deeper than the top.** When the handler in place is not at the top, the stack is rebuilt down to its
-  level with the new state in it; nothing is rebuilt when the state did not change. A `k` taken earlier still
-  holds the old levels, and so the old state.
+- **A state deeper than the top.** When the handler in place is not at the top, Scala writes the new state into
+  the handler's level where it is. Java rebuilds the stack down to that level with the new state in it; nothing is
+  rebuilt when the state did not change. Either way a `k` taken earlier holds the state as it was when taken.
 - **A general clause runs outside its handler.** The handler's own level is in `k`, not on the stack the clause
   runs on. When the handler was the lowest, the clause runs on one empty level.
 - **Resume.** The current top `T` goes below `k`'s levels, unless it is empty and nothing is below it. Levels of
   `k` with neither frames nor mark are not put back, except its highest, which becomes the top.
 - **Return.** After `ret`, the level below becomes the top; when there is none, an empty level does.
 
-Every rule is a bounded amount of work, except the search for a handler, the replacing of a deeper state, and the
+Every rule is a bounded amount of work, except the search for a handler, the replacing of a deeper state (Java), and the
 taking and putting back of `k`: these are linear in the number of levels they pass. No rule calls the machine:
 the stack of the host language does not grow with the program. `run c` is `step c` when it stops at `Done`.
 
@@ -173,15 +181,27 @@ same effect. With no handler left, `step` stops (§8). The three kernels decide 
   expected, it is an `Ask` in that program's row and needs an `In[E, R]`; `perform[E](op)` is the `Ask` at once.
   `handle(p, h)` needs a `Split[E, R, Rest]` and gives `B ! Rest`, the row as one would write it:
   `State % Int + Choose` without the state is `Choose`. `intercept` needs an `In[E, R]` and gives `B ! R`.
-  `flatMap` needs one row on both sides. `run` takes `A ! Pure`. The evidence is found by the compiler and is the
-  effect's place, a number: 0 the last effect of the row, 1 the one before it. `Ask` carries it, and a mark has
-  its handler's. Walking down, a level whose place is the operation's accepts it; past a level put by `handle`
-  with a smaller place the operation's number is one less; an interceptor changes no number. `p.into[S]` needs a
-  `Sub[R, S]`: for every place of `R`, its place in `S`. Where no number changes it is `p` itself; one operation
-  is asked at its new place; any other program runs under a *renaming level*: a level with no handler, past which
-  an operation has its place in `S`. It is popped with its value and is part of a `k` like any level. No class is
-  looked at. One effect twice in a row is two places: the compiler finds the last, `Place.init` names the other.
-  This is the requirement, exactly.
+  `run` takes `A ! Pure`. The evidence is found by the compiler and is the effect's *place*, data typed by the
+  effect, the row, and the row without it: a `Place[E, R, Rest]`, one of `Only` (the one effect of a row of one),
+  `Last` (the last of `R + E`), `First` (the first of a row of two) and `Init` (one further in than the last).
+  `Ask` carries it, and a level has its handler's. Walking down, a level matches its handler's place against the
+  operation's. When they are one place, the match shows the compiler that the two effects are one: the clause is
+  given the operation at its own type. Any other operation goes on with its place in the row outside: past a level
+  put by `handle`, the row without the handler's effect; past an interceptor, the same row. No class of an
+  operation is looked at. One effect twice in a row is two places: the compiler finds the last, `Place.init` names
+  the other.
+  A bind, `p.flatMap(f)`, is of the row expected of it, or with none expected of the row `f` gives. `p` need not
+  be of that row (`Fits`): a word is placed in it, and a program of a smaller row is put into it as `into` does.
+  The same holds of `map`, and of a program used where one of a bigger row is expected. Where an `if` or a `match`
+  that mixes words and programs is bound, a macro (`Branches.scala`) fits each branch on its own. `p.into[S]`
+  needs a `Sub[R, S]`: for every place of `R`, its place in `S`. Into the same row it is `p` itself; one operation
+  or one value is made anew at its place; any other program is a node `Embedded`, run under a *renaming level*: a
+  level with no handler, past which an operation has its place in `S`. It is popped with its value and is part of
+  a `k` like any level.
+  This is the requirement, exactly, for the effects of a row. A row and an effect are of one kind, `F[_]`, so a row
+  can be written where an effect is meant: handled as if it were one effect, or embedded so by a place named by
+  hand. The types do not refuse it. No operation is of such a place, and the machine throws `NoHandler` when one
+  comes to it.
 - **Java 25: by position.** `Comp<A, R>`. The row is a nested type in the order of the handlers, nearest first:
   `Eff<State<Integer>, Eff<Choose, ?>>`; the empty row is `Pure`. An operation's class names its effect, its
   answer and itself: `Op<E, X, Self extends E>`. `perform` takes an `O extends Op<E, X, ? super O>` and gives
@@ -209,7 +229,8 @@ same effect. With no handler left, `step` stops (§8). The three kernels decide 
   is another type; two entries of one type are not told apart by the row, only by `mine`.
 
 An operation with no handler stops the run with the operation and `k`. Scala adds the operation's place in the row
-of the whole run, by which its effect is known (`Asked.of`).
+of the whole run, by which its effect is known (`Asked.of`). Its `run` takes only the empty row, and throws
+`NoHandler` if the step stops at an operation all the same.
 
 ## 8. The step, and the wire
 
@@ -234,7 +255,8 @@ A kernel conforms when:
    an answer that comes later; interception; delegation; reader and `local`; recover, first, fresh, clock; the
    stream functions; both, race, all, sleep; a million answers given at once; an operation with no handler; in
    Scala and Java, one effect twice in a row, each entry with its own handler; in Scala, a program put into a
-   bigger row, its effects there in any order.
+   bigger row, by `into` and where it is bound, its effects there in any order, and a row handled as one effect
+   refused with `NoHandler`.
 2. **Programs that must not run do not compile**: an effect left in the row (`java/negative/`, the doctests of
    `rust/src/lib.rs`, `compileErrors` in the Scala `Properties`), an answer of the wrong type and a handler that
    misses an operation (`java/negative/`, the doctests), an operation whose class is not of the effect it names

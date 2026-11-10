@@ -207,16 +207,16 @@ caller runs. Scala has two of the family's other names as aliases (`std/Family.s
 
 | | Scala 3 | Java 25 | Rust |
 |---|---|---|---|
-| the row | a type constructor, the effects in order: `A ! State % Int + Choose`, empty row `Pure`; a program has a declared row, or is over any `R[_]: Has[State % Int]`; the evidence (`In`, `Split`, `Sub`) is found by the compiler | a nested type with wildcards, `Comp<A, Eff<State<Integer>, Eff<Choose, ?>>>`, empty row `Pure`; positional | a type-level list, `impl Prog<A, eff![State<i64>, Choose]>`, empty row `()`; membership inferred (`Has<E, I>`) |
-| a program of a smaller row in a bigger one | `p.into[S]`, the effects in any order (`Sub[R, S]`); never without `into` | `up`, `under`, `fit`: the order of the handlers is kept | inferred for a program generic in its row; `embed`, `also` for one of a fixed row |
+| the row | a type constructor, the effects in order: `A ! State % Int + Choose`, empty row `Pure`; a program has a declared row, or is over any `R[_]: Has[State % Int]`; the evidence (`In`, `Split`, `Sub`, made of the `Place` of each effect) is found by the compiler | a nested type with wildcards, `Comp<A, Eff<State<Integer>, Eff<Choose, ?>>>`, empty row `Pure`; positional | a type-level list, `impl Prog<A, eff![State<i64>, Choose]>`, empty row `()`; membership inferred (`Has<E, I>`) |
+| a program of a smaller row in a bigger one | automatic where it is bound (`flatMap`, `map`, a `for`) and where a bigger row is expected (an argument, a result, a branch), the effects in any order (`Sub[R, S]`); `p.into[S]` says it; a bind that embeds takes one more level | `up`, `under`, `fit`: the order of the handlers is kept | inferred for a program generic in its row; `embed`, `also` for one of a fixed row |
 | a handler takes its effect out | from any place; what is left is the row as one would write it: `State % Int + Choose` without the state is `Choose` | from the front of the row only | from any place (`Has::Rest`) |
-| how a handler is found | by the effect's place in the row: the evidence is that place, an `Int`; a program put into a row with other places runs under a level that renames them; no class is looked at | by the operation's position in the row: it carries how many row levels it skips (`up`, `under`); its class is not tested; an interceptor by the class of the operation | by the effect's `TypeId`, type arguments included: the nearest handler of it that says `mine` |
+| how a handler is found | by the effect's place in the row: the evidence is that place, data typed by the effect and the row (`Place`: `Only`, `Last`, `First`, `Init`); a level matches its handler's place against the operation's, and passes any other on at its place in the row outside; a program put into another row runs under a level that renames places; no class of an operation is looked at | by the operation's position in the row: it carries how many row levels it skips (`up`, `under`); its class is not tested; an interceptor by the class of the operation | by the effect's `TypeId`, type arguments included: the nearest handler of it that says `mine` |
 | one effect twice in a row | two places: the compiler finds the last, the other is named (`Place.init`) | two positions: `Eff<Reader<String>, Eff<Reader<Integer>, ?>>` | told apart by its type arguments; of one type, by an identity in the operation and `mine` |
-| an effect left unhandled | compile error, naming the effect and the row: `run` takes `A ! Pure` | compile error: `run` takes `Comp<A, ? super Pure>` | compile error: `run` asks `R: Closed`, which only `()` is |
+| an effect left unhandled | compile error, naming the effect and the row: `run` takes `A ! Pure`; a row written where an effect is meant is refused at run time (`NoHandler`, see Limits) | compile error: `run` takes `Comp<A, ? super Pure>` | compile error: `run` asks `R: Closed`, which only `()` is |
 | an operation not of the effect it names | compile error: `word` and `perform[E]` take an `E[X]` | compile error: `Op<E, X, Self extends E>` where the class is declared; `perform`, for a class that names another as itself | cannot be written: an operation is a variant of the effect's enum |
 | an answer of the wrong type | compile error (GADT match) | compile error (the operation is the witness: `k.resume(get, s)`) | compile error (`Reply<X>` gives only an `X`) |
 | a handler missing a case | compile error (the exhaustivity warning, under `-Werror`) | compile error (`switch` over the sealed interface) | compile error (`match` over the enum) |
-| casts and `unsafe` in the kernel | 12 `asInstanceOf`: 8 in `Machine.scala`, 4 in `Effects.scala` (`Step.Asked.of`, an `into` that changes no place, two for a bound `if`); none in `Rows.scala` or `std` | `Machine.java` is raw and unchecked: a handler is given an operation as its effect with no test; one unchecked cast in `Effects`, behind `up`, `under`, `fit` | `unsafe` in `val.rs`, `pool.rs` and `erased.rs`; a value is taken out by its `TypeId` |
+| casts and `unsafe` in the kernel | none: no `asInstanceOf` and no `@unchecked` in `scala/src` or `scala/test`; places, frames, levels and `k` are typed, and a clause is given its operation at its own type; inside the kernel `null` says "not this place" | `Machine.java` is raw and unchecked: a handler is given an operation as its effect with no test; one unchecked cast in `Effects`, behind `up`, `under`, `fit` | `unsafe` in `val.rs`, `pool.rs` and `erased.rs`; a value is taken out by its `TypeId` |
 | where a program's type is forgotten | nowhere: a program is `A ! R` whatever its shape | nowhere: `Comp<A, R>` | where `.boxed()` says: it gives `Comp<A, R>`, needed at recursion, at branches of different shapes, and for a program kept as a value |
 | a computation run many times | yes: immutable data | yes: immutable data | no: `run` and `step` take it by value; build it by a function |
 | a continuation resumed many times | yes | yes | yes (`K` is `Clone`; a state in place and what a closure holds are `Clone`) |
@@ -226,12 +226,14 @@ caller runs. Scala has two of the family's other names as aliases (`std/Family.s
 
 The same benchmark in each language, four lanes: `state` (get and put in a loop), `reader3` (an ask answered three
 handlers away), `choose` (a continuation taken twice at every step of a tree of depth 18), `binds` (a loop of
-nothing but binds). Nanoseconds per operation, the best of 7 rounds, each measured once on one machine — a record of
-one run, not a claim:
+nothing but binds). Nanoseconds per operation, the best of 7 rounds, on one machine — a record of runs, not a
+claim. Java's and Rust's rows are one run each. Scala's row is a range: it was measured twice on that machine, apart
+from the other two rows and under different load, and the two differed — 7.2, 9.5, 109 and 6.1 (three runs), then
+9.8, 11.6, 125.6 and 6.5 (one run):
 
 | | state | reader3 | choose | binds |
 |---|---|---|---|---|
-| Scala 3 | 11.7 | 14.7 | 110 | 6.6 |
+| Scala 3 | 7.2 – 9.8 | 9.5 – 11.6 | 109 – 125.6 | 6.1 – 6.5 |
 | Java 25 | 11.0 | 13.5 | 88 | 6.4 |
 | Rust | 5.7 | 7.8 | 187 | 5.8 |
 
@@ -244,9 +246,10 @@ continuations and boxed values come from a thread-local pool (`rust/src/pool.rs`
 
 ```
 SPEC.md     the model: data, the machine's rules, laws, rows, conformance
-scala/      scala-cli. src/Effects.scala the typed surface, Rows.scala the rows and places, Messages.scala the
-            compile errors, Machine.scala the loop, src/std the effects (Family.scala the family's other names),
-            src/wire the wire, src/bench; test/ (munit)
+scala/      scala-cli. src/Effects.scala the typed surface, Rows.scala the rows and places, Machine.scala the
+            loop, Branches.scala the macro that places the branches of a bound `if`, Messages.scala the compile
+            errors, src/std the effects (Family.scala the family's other names), src/wire the wire, src/bench;
+            test/ (munit)
 java/       javac, no build tool. src/okay/effects/java: Effects, Comp, Eff, Pure, Op, Handler, InPlace, K, Cell,
             Step, Machine; std/, wire/, bench/; test/; negative/ the programs javac must refuse
 rust/       cargo, no dependencies. src/lib.rs the typed surface, machine.rs, erased.rs, val.rs, pool.rs,
@@ -256,7 +259,7 @@ test.sh     everything
 ```
 
 `./test.sh` needs scala-cli, a JDK 25 or newer and cargo, and takes about a minute. It runs the three test suites
-(Scala 61 tests; Java 25 properties, 25 wire tests and 6 programs refused by javac; Rust 68 tests, compile-fail
+(Scala 68 tests; Java 25 properties, 25 wire tests and 6 programs refused by javac; Rust 68 tests, compile-fail
 doctests among them), every worker against the 6 transcripts, and the nine host–worker pairs.
 
 ```
@@ -267,19 +270,29 @@ cd rust && cargo run --release --example bench
 
 ## Limits
 
-- **Scala: a word takes its row from the program's declared type, or from an evidence in scope.** With neither it
-  is a program of its one effect. So a program of two effects with no declared type is refused:
-  `State.run(0)(for x <- Choose.among(1, 2); _ <- State.put(x) yield x)` does not compile, and the error says how a
-  row is said; its first word says it: `Choose.among(1, 2).into[App]`. Under a declared row, `State.get` bound in a
-  `for` says its type, `State.get[Int]`: the row gives it too late for the function that follows.
-- **Scala: only a word is placed without being told.** A program generic in its row (`State.modify`,
-  `Emit.sendAll`, any `def p[R[_]: Has[..]]`) is taken as it is where the declared type expects it; bound inside a
-  `for` of a declared row it says the row: `State.modify[Int, App](_ + x)`, `p[App]`. A program of a smaller row
-  is never one of a bigger row by itself: it says `.into` (`small.into[App]` inside a `for`). Of the two branches
-  of a bound `if` that are words of two effects, one says `.into[App]`.
-- **Scala: `into` is free only sometimes.** It costs nothing when every effect keeps its place (the smaller row is
-  the end of the bigger one), and one allocation for a single operation. Any other program runs under one more
-  level of the machine, which the search for a handler passes.
+- **Scala: a program with no declared type takes its row from what its function gives.** A word with no row
+  expected of it is a program of its one effect, and a bind with no row expected takes the row of what follows it,
+  not of its head. So a program of two effects with no declared type is refused:
+  `State.run(0)(for x <- Choose.among(1, 2); _ <- State.put(x) yield x)` does not compile, and neither does an
+  undeclared `p.flatMap(_ => Choose.among(1, 2))` with `p` of the row `App`. The error says how a row is said:
+  declare the program's type, or say the row on the last word, `State.put(x).into[App]`.
+- **Scala: a word bound under a declared row says its type.** `State.get` or `Reader.ask` bound in a `for` of a
+  declared row is `State.get[Int]`: the row gives the type too late for the function that follows. Under an
+  evidence in scope (`R[_]: Has[State % Int]`), or where a program is expected (`val p: Int ! App = State.get`),
+  it says nothing. `State.modify` types its lambda everywhere: `State.modify((s: Int) => s + 1)`.
+- **Scala: a bind that embeds takes a level.** A program of a smaller row is put into the bigger one where it is
+  bound, or where the bigger row is expected. This holds also of a program generic in its row that is bound with no
+  row said (`_ <- tick`): it is then of its own effects alone. Such a program runs under one more level of the
+  machine, made and dropped at that bind, which renames its operations on their way out. One measurement, by the
+  author of the kernel on one machine: about 14 ns and 128 bytes a bind more than the program told its row
+  (`tick[App]`). `into` is the same program only into the same row; one operation or one value is made anew at its
+  place; any other program takes the level, also when every effect keeps its place.
+- **Scala: a row can be written where an effect is meant.** A row and an effect are of one kind, `F[_]`, so the
+  types do not refuse a handler of a row as if it were one effect: with `p: Int ! App`,
+  `handle(p, Handler.abort[App, Pure, Int, Int](..))` compiles and has the type `Int ! Pure`. No operation is
+  of such a place: when one comes to it, `run` and `step` throw `NoHandler` (the test "no handler" in
+  `Properties`). The same holds of a program put into a row by a place named by hand, as if its row were one
+  effect there (`p.into[Reader % Int + App](using Place.last)`).
 - **Java rows are positional.** A program names its effects in the order of its handlers and is moved with `up`,
   `under` and `fit`. `perform` gives a row open only after its first effect; a row meant to be used inside longer
   rows is written open at every step: `Eff<State<Integer>, ? extends Eff<Choose, ?>>`.
