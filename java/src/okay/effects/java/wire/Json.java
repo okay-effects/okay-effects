@@ -15,18 +15,30 @@ public sealed interface Json {
   record Dec(double value) implements Json {}
   record Str(String value) implements Json {}
   record Arr(List<Json> values) implements Json {}
-  record Obj(Map<String, Json> fields) implements Json {}
+  /** the fields in the order they were given */
+  record Obj(Map<String, Json> fields) implements Json {
+    /** this object and one field more */
+    public Obj with(String name, Json value) {
+      Map<String, Json> more = new LinkedHashMap<>(fields);
+      more.put(name, value);
+      return new Obj(more);
+    }
+  }
+  /** not JSON: something the far side keeps, known here by a number. On the wire it is the escape {@code ref}. */
+  record Ref(long id, String kind) implements Json {}
 
   Json NULL = new Null();
 
+  static Json of(boolean value) { return new Bool(value); }
   static Json of(long value) { return new Int(value); }
   static Json of(String value) { return new Str(value); }
   static Json of(List<Json> values) { return new Arr(values); }
 
   /** an object of the names and values given in turn */
-  static Json obj(Object... namesAndValues) {
+  static Obj obj(Object... namesAndValues) {
     Map<String, Json> fields = new LinkedHashMap<>();
     for (int i = 0; i < namesAndValues.length; i += 2) {
+      // the casts: the arguments come in turn, a name and then its value
       fields.put((String) namesAndValues[i], (Json) namesAndValues[i + 1]);
     }
     return new Obj(fields);
@@ -46,6 +58,7 @@ public sealed interface Json {
       case Obj o -> o.fields().entrySet().stream()
           .map(field -> quote(field.getKey()) + ":" + field.getValue().text())
           .collect(Collectors.joining(",", "{", "}"));
+      case Ref ref -> Escapes.enc(ref).text();
     };
   }
 
@@ -58,12 +71,14 @@ public sealed interface Json {
         case '\n' -> out.append("\\n");
         case '\r' -> out.append("\\r");
         case '\t' -> out.append("\\t");
+        // the cast: a control character is written by its number
         default -> { if (c < ' ') out.append(String.format("\\u%04x", (int) c)); else out.append(c); }
       }
     }
     return out.append('"').toString();
   }
 
+  /** the value of the text; a text that is not JSON is an {@code IllegalArgumentException} */
   static Json parse(String text) {
     Parser parser = new Parser(text);
     Json value = parser.value();
@@ -96,7 +111,7 @@ public sealed interface Json {
       if (take("true")) return new Bool(true);
       if (take("false")) return new Bool(false);
       if (take("\"")) return new Str(string());
-      if (take("[")) return new Arr(List.copyOf(items("]", this::value)));
+      if (take("[")) return new Arr(items("]", this::value));
       if (take("{")) {
         Map<String, Json> fields = new LinkedHashMap<>();
         for (Map.Entry<String, Json> field : items("}", this::field)) fields.put(field.getKey(), field.getValue());
@@ -133,13 +148,19 @@ public sealed interface Json {
         char c = text.charAt(at);
         if (c == '\\') {
           at++;
+          if (at >= text.length()) throw fail("the end of a string");
           switch (text.charAt(at)) {
             case 'n' -> out.append('\n');
             case 'r' -> out.append('\r');
             case 't' -> out.append('\t');
             case 'b' -> out.append('\b');
             case 'f' -> out.append('\f');
-            case 'u' -> { out.append((char) Integer.parseInt(text.substring(at + 1, at + 5), 16)); at += 4; }
+            case 'u' -> {
+              if (at + 5 > text.length()) throw fail("four hex digits");
+              // the cast: a UTF-16 code unit, as JSON writes it
+              out.append((char) Integer.parseInt(text.substring(at + 1, at + 5), 16));
+              at += 4;
+            }
             default -> out.append(text.charAt(at));
           }
         } else {
@@ -152,13 +173,17 @@ public sealed interface Json {
       return out.toString();
     }
 
+    /** a number written with a fraction or an exponent is a float, any other an integer */
     private Json number() {
       int from = at;
       while (at < text.length() && "+-.eE0123456789".indexOf(text.charAt(at)) >= 0) at++;
       String digits = text.substring(from, at);
       if (digits.isEmpty()) throw fail("a value");
-      boolean decimal = digits.contains(".") || digits.contains("e") || digits.contains("E");
-      return decimal ? new Dec(Double.parseDouble(digits)) : new Int(Long.parseLong(digits));
+      try {
+        return new Int(Long.parseLong(digits));
+      } catch (NumberFormatException notAnInteger) {
+        return new Dec(Double.parseDouble(digits));
+      }
     }
   }
 }

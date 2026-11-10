@@ -8,7 +8,7 @@ import okay.effects.java.Op;
 
 /** THE OPERATION THAT CROSSES a process: a name and arguments in JSON, answered in JSON. A program written over it
  * runs in one process, in one language; its handlers may be in another. Only this data crosses — a continuation
- * stays where it was made, known outside by a number. The messages are the okay wire's (SPEC.md, "The wire"). */
+ * stays where it was made, known outside by a number. The messages are the okay wire's (wire/README.md). */
 public sealed interface Foreign {
   record Call(String name, List<Json> args) implements Foreign, Op<Foreign, Json> {}
 
@@ -16,12 +16,6 @@ public sealed interface Foreign {
     return Effects.perform(in, new Call(name, List.of(args)));
   }
 
+  /** the wire's version: a host refuses a far side of any other */
   long SHIM = 9;
-
-  /** The far side's failure, by name. */
-  final class Condition extends RuntimeException {
-    private static final long serialVersionUID = 1L;
-    public final String kind;
-    public Condition(String kind, String message) { super(kind + ": " + message); this.kind = kind; }
-  }
 }
