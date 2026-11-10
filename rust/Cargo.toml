@@ -1,0 +1,10 @@
+[package]
+name = "okay-algebraic"
+version = "0.1.0"
+edition = "2024"
+description = "Algebraic effects and handlers: computations as data, one small machine. The Rust kernel of okay-effects."
+license = "Apache-2.0"
+repository = "https://github.com/okay-effects/okay-effects"
+
+[lib]
+name = "okay_algebraic"

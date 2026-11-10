@@ -55,7 +55,7 @@ public sealed interface Comp<A> {
       switch (c) {
         case Ask ask -> { return new Step.Asked(ask.op(), k); }
         case Bind bind -> { k = new Rest.Then(bind.next(), k); c = bind.first(); }
-        case Plug plug -> { k = new Rest.Both(plug.rest(), k); c = plug.first(); }
+        case Plug plug -> { k = k instanceof Rest.End ? plug.rest() : new Rest.Both(plug.rest(), k); c = plug.first(); }
         case Done done -> {
           switch (k) {
             case Rest.End end -> { return new Step.Done(done.value()); }
