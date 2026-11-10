@@ -313,7 +313,8 @@ cd rust && cargo run --release --example bench
 - **Rust does not tie a `Reply` to its `k`.** A `Reply` kept from another operation is accepted by `k.resume`; if
   its type is not the one awaited, the program panics where the value is taken.
 - **Rust**: a computation is run once; everything is of one thread; the `unsafe` code of `val.rs`, `pool.rs` and
-  `erased.rs` has its argument in comments and has not been checked under Miri.
+  `erased.rs` has its argument in comments. Under Miri the three modules' own tests, the TCK and the properties
+  pass, the properties without their million-step loops and the endless stream, which were not run there.
 - **The wire** leaves out tables and data frames, direct-style far sides (`once`) and `continue` with a
   condition, `bytes`, `zlib`, `verify` and `describe`, TCP, TLS and in-process links (the list is at the end of
   [wire/README.md](wire/README.md)). The transport is a child process's standard input and output. What is
