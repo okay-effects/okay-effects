@@ -28,15 +28,18 @@ public sealed interface Reader<V> {
     }, null, p);
   }
 
-  /** the program, its asks answered by the reader outside, through {@code f}: an interceptor */
-  static <V, A, R extends Eff<Reader<V>, ?>> Comp<A, R> local(Function<V, V> f, Comp<A, ? super R> p) {
-    return intercept(Reader.class, new Handler<Reader<V>, A, A, R>() {
-      public Comp<A, R> ret(A a) { return pure(a); }
-      public Comp<A, R> on(Reader<V> op, K<A, R> k) {
+  /** the program, its asks answered by the reader outside, through {@code f}. An interceptor at the reader's
+   * place in the row: a handler of the program's first effect, put over the reader — the rest of the program's
+   * effects are one handler further ({@code under}), and the row is as it was. */
+  static <V, A, T> Comp<A, Eff<Reader<V>, ? extends T>> local(
+      Function<V, V> f, Comp<A, ? super Eff<Reader<V>, T>> p) {
+    return handle(Reader.class, new Handler<Reader<V>, A, A, Eff<Reader<V>, ? extends T>>() {
+      public Comp<A, Eff<Reader<V>, ? extends T>> ret(A a) { return pure(a); }
+      public Comp<A, Eff<Reader<V>, ? extends T>> on(Reader<V> op, K<A, Eff<Reader<V>, ? extends T>> k) {
         return switch (op) {
           case Ask<V> ask -> Reader.<V>ask().flatMap(v -> k.resume(ask, f.apply(v)));
         };
       }
-    }, p);
+    }, under(p));
   }
 }

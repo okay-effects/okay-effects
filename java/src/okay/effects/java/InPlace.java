@@ -10,5 +10,6 @@ public interface InPlace<F, S, A, B, R> {
    * {@code case Get<S> get -> state.answer(get, state.value)} */
   Cell.Answered answer(Cell<S> state, F op);
 
+  /** for an interceptor: of the operations of its class, those it takes; see {@link Handler#mine} */
   default boolean mine(F op) { return true; }
 }

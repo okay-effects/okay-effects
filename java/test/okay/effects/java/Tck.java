@@ -60,8 +60,8 @@ final class Tck {
   record RaiseOp(int e, int n) implements Fail, Op<Fail, Integer> {}
 
   /** THE ROW of every program: the four effects stay in it whatever handlers the program is under — a handler
-   * here answers its own operations and lets the others pass. Named, so that it is written out
-   * once; the empty row by its full name, for `Pure` is here a term of the TCK. */
+   * here is an interceptor: it answers its own operations, found by their class, and lets the others pass. Named,
+   * so that it is written out once; the empty row by its full name, for `Pure` is here a term of the TCK. */
   interface Row extends Eff<Log, Eff<Store, Eff<Fail, Eff<Choose, okay.effects.java.Pure>>>> {}
 
   record Summed(int sum, int value) {}
@@ -119,6 +119,24 @@ final class Tck {
     }, p);
   }
 
+  /** every path of a choice, the values summed. An interceptor like the others: the row's choice is not its first
+   * effect, and whatever asks a choice inside is answered here, by the class. */
+  static Comp<Integer, Row> chooses(Comp<Integer, Row> p) {
+    return intercept(Choose.class, new Handler<Choose, Integer, Integer, Row>() {
+      public Comp<Integer, Row> ret(Integer a) { return pure(a); }
+      public Comp<Integer, Row> on(Choose op, K<Integer, Row> k) {
+        return switch (op) {
+          case Choose.Among<?> among -> every(among, 0, 0, k);
+        };
+      }
+    }, p);
+  }
+
+  private static <X> Comp<Integer, Row> every(Choose.Among<X> among, int i, int sum, K<Integer, Row> k) {
+    if (i == among.values().size()) return pure(sum);
+    return k.resume(among, among.values().get(i)).flatMap(more -> every(among, i + 1, sum + more, k));
+  }
+
   static Comp<Integer, Row> build(T t) {
     return switch (t) {
       case Pure pure -> pure(pure.n());
@@ -132,8 +150,7 @@ final class Tck {
       case WriterH w -> writer(w.e(), build(w.body()));
       case StateH s -> state(s.e(), s.s0(), build(s.body()));
       case ThrowsH f -> fails(f.e(), build(f.body()));
-      // the body's row has a choice already: this handler is nearer, and answers it
-      case ChooseH c -> Choose.all(up(build(c.body()))).map(vs -> vs.stream().mapToInt(v -> v).sum());
+      case ChooseH c -> chooses(build(c.body()));
     };
   }
 

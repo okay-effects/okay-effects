@@ -13,10 +13,11 @@ public abstract sealed class Comp<A, R> {
     Done(A value) { this.value = value; }
   }
 
-  /** a question: an operation, to be answered */
+  /** a question: an operation, to be answered by the handler `skip` row levels past the nearest */
   static final class Ask<X, R> extends Comp<X, R> {
     final Op<?, X> op;
-    Ask(Op<?, X> op) { this.op = op; }
+    final int skip;
+    Ask(Op<?, X> op, int skip) { this.op = op; this.skip = skip; }
   }
 
   /** a computation, and what follows its value; the rows of the two were checked where they were bound */
@@ -26,7 +27,7 @@ public abstract sealed class Comp<A, R> {
     Bind(Comp<X, ?> first, Function<X, ? extends Comp<A, ?>> next) { this.first = first; this.next = next; }
   }
 
-  /** a computation under a handler, with the handler's state */
+  /** a computation under a handler, with the handler's state; or under the marker of an `up` or `under` */
   static final class Handle<A, R> extends Comp<A, R> {
     final Machine.Mark mark;
     final Object state;

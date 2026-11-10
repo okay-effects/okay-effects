@@ -96,11 +96,12 @@ final class Properties {
     return Async.<Integer>await(resume -> resume.accept(1)).flatMap(x -> answered(n - 1, sum + x));
   }
 
-  /** an interceptor: every operation on the state seen, a put of more than 2 changed, and all asked again */
-  static <A, R extends Eff<State<Integer>, ?>> Comp<A, R> audit(List<String> seen, Comp<A, ? super R> p) {
-    return intercept(State.class, new Handler<State<Integer>, A, A, R>() {
-      public Comp<A, R> ret(A a) { return pure(a); }
-      public Comp<A, R> on(State<Integer> op, K<A, R> k) {
+  /** an interceptor at the state's place in the row — a handler of the program's first effect, put over the state
+   * ({@code under}): every operation on the state seen, a put of more than 2 changed, and all asked again */
+  static <A, T> Comp<A, Eff<State<Integer>, T>> audit(List<String> seen, Comp<A, ? super Eff<State<Integer>, T>> p) {
+    return handle(State.class, new Handler<State<Integer>, A, A, Eff<State<Integer>, T>>() {
+      public Comp<A, Eff<State<Integer>, T>> ret(A a) { return pure(a); }
+      public Comp<A, Eff<State<Integer>, T>> on(State<Integer> op, K<A, Eff<State<Integer>, T>> k) {
         seen.add(op.toString());
         return switch (op) {
           case State.Put<Integer> put when put.value() > 2 ->
@@ -109,7 +110,7 @@ final class Properties {
           case State.Get<Integer> get -> perform(get).flatMap(s -> k.resume(get, s));
         };
       }
-    }, p);
+    }, under(p));
   }
 
   sealed interface Account {}
@@ -126,6 +127,52 @@ final class Properties {
         };
       }
     }, p);
+  }
+
+  // Two effects of one class are two places in the row: an operation goes to the one its type says.
+
+  static Comp<String, Eff<State<String>, Eff<State<Integer>, ?>>> twoStates() {
+    return State.<String>modify(s -> s + "b").flatMap(done ->
+        up(State.<Integer>modify(n -> n + 1)).flatMap(more ->
+            up(State.<Integer>get()).flatMap(n -> State.<String>get().map(s -> s + n))));
+  }
+
+  static Comp<Integer, Eff<State<Integer>, Eff<Reader<Integer>, ?>>> stateOverReader() {
+    return State.<Integer>get().flatMap(s ->
+        up(Reader.<Integer>ask()).flatMap(v -> State.put(s + v).map(done -> s + v)));
+  }
+
+  /** a choice two places out, asked under a marker: the rest of the program, taken there, has the marker in it */
+  static Comp<Integer, Eff<State<String>, Eff<State<Integer>, Eff<Choose, ?>>>> chosenAcross() {
+    Comp<Integer, Eff<State<Integer>, Eff<Choose, ?>>> inner = up(Choose.among(List.of(1, 2))).flatMap(x -> add(x));
+    return up(inner).flatMap(v -> State.<String>modify(s -> s + v).map(done -> v));
+  }
+
+  static Comp<String, Eff<Reader<String>, Eff<Reader<Integer>, ?>>> twoReaders() {
+    return up(Reader.<Integer>ask()).flatMap(n -> Reader.<String>ask().map(s -> s + n));
+  }
+
+  /** an interceptor found by the class: every fresh number that passes is seen, asked again, and a hundred more */
+  static <A, R extends Eff<Fresh, ?>> Comp<A, R> hundred(List<String> seen, Comp<A, ? super R> p) {
+    return intercept(Fresh.class, new Handler<Fresh, A, A, R>() {
+      public Comp<A, R> ret(A a) { return pure(a); }
+      public Comp<A, R> on(Fresh op, K<A, R> k) {
+        seen.add(op.toString());
+        return switch (op) {
+          case Fresh.Next next -> perform(next).flatMap(n -> k.resume(next, n + 100));
+        };
+      }
+    }, p);
+  }
+
+  static Comp<Pair<Long, Long>, Eff<Fresh, Eff<Fresh, ?>>> twoFresh() {
+    return Fresh.fresh().flatMap(a -> up(Fresh.fresh()).map(b -> new Pair<>(a, b)));
+  }
+
+  /** the rest of a program that stopped at a question, resumed with the answer */
+  @SuppressWarnings("unchecked") // the answer is given as the test knows the operation asks: an Integer for a Get
+  static <X, A, R> Step<A, R> resumed(Step<A, R> at, Object answer) {
+    return step(((Step.Asked<X, A, R>) at).k().apply((X) answer));
   }
 
   /** the lie the compiler does not let a program tell: a row without an effect that is asked */
@@ -236,6 +283,49 @@ final class Properties {
       } catch (NoHandler e) {
         same(e.op, new State.Get<>());
       }
+    });
+
+    test("two handlers of one class: an operation goes to the one its place in the row says", () -> {
+      same(run(Reader.run(1, Reader.run("s", up(Reader.<Integer>ask()).map(x -> x + 1)))), 2);
+      same(run(Reader.run(1, Reader.run("s", up(Reader.<Integer>ask().map(x -> x + 1))))), 2);
+      same(run(State.run(1, State.run("a", twoStates()))), new State.Final<>(2, new State.Final<>("ab", "ab2")));
+    });
+
+    test("two places up, past a handler of the operation's own class", () -> {
+      same(run(Reader.run(7, Reader.run("s", Reader.run(1.5, up(up(Reader.<Integer>ask())))))), 7);
+      same(run(Reader.run(7, Reader.run("s", Reader.run(1.5, up(up(Reader.<Integer>ask().map(x -> x + 1))))))), 8);
+      same(run(Reader.run(7, Reader.run("s", up(Reader.run(1.5, up(Reader.<Integer>ask().map(x -> x + 1))))))), 8);
+    });
+
+    test("under: a handler put between the first effect and the rest", () -> {
+      same(run(Reader.run(5, Reader.run("s", State.run(0, under(stateOverReader()))))), new State.Final<>(5, 5));
+      same(run(Reader.run(5, Reader.run("s", Reader.run(1.5, State.run(0, under(under(stateOverReader()))))))),
+          new State.Final<>(5, 5));
+      same(run(Reader.run(5, State.run(0, Reader.run("s", up(stateOverReader()))))), new State.Final<>(5, 5));
+    });
+
+    test("constant stack: a million operations under a marker", () ->
+        same(run(State.run(0, Reader.run("s", up(count(1_000_000))))), new State.Final<>(1_000_000, 1_000_000)));
+
+    test("a continuation resumed twice across a marker: each path its own states", () ->
+        same(run(Choose.all(State.run(0, State.run("", chosenAcross())))), List.of(
+            new State.Final<>(1, new State.Final<>("1", 1)), new State.Final<>(2, new State.Final<>("2", 2)))));
+
+    test("a question no handler answers, asked under a marker: the rest resumed with the answer", () -> {
+      Step<Integer, ?> at = step(up(State.<Integer>get().flatMap(s -> State.put(s + 1).map(done -> s))));
+      at = resumed(at, 4);
+      same(at instanceof Step.Asked<?, ?, ?> asked ? asked.op() : null, new State.Put<>(5));
+      same(resumed(at, null), new Step.Done<>(4));
+    });
+
+    test("an interceptor between two handlers of one class", () -> {
+      // at a place in the row: the inner reader's asks changed, the outer one's pass
+      same(run(Reader.run(1, Reader.run("s", Reader.local(s -> s + "!", twoReaders())))), "s!1");
+      same(run(Reader.run(1, Reader.local(n -> n * 10, Reader.run("s", twoReaders())))), "s10");
+      // by the class: what goes to the outer handler passes the interceptor, what goes to the inner does not
+      List<String> seen = new ArrayList<>();
+      same(run(Fresh.run(hundred(seen, Fresh.run(twoFresh())))), new Pair<>(0L, 100L));
+      same(seen, List.of("Next[]"));
     });
 
     test("a thousand random programs: the reference machine's digest", () -> same(Tck.digest(), Tck.DIGEST));

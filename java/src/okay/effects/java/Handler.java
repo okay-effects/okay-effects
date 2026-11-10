@@ -9,6 +9,7 @@ public interface Handler<F, A, B, R> {
   /** an operation of the effect, and the rest of the program: a {@code switch} over the sealed family */
   Comp<B, R> on(F op, K<B, R> k);
 
-  /** of the operations of {@code F}, those this handler answers; any other passes outside */
+  /** for an interceptor: of the operations of its class, those it takes; any other passes on. A handler put by
+   * {@code handle} is not asked: the row sends it the operations of its effect, and it answers them all. */
   default boolean mine(F op) { return true; }
 }
