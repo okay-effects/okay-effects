@@ -13,6 +13,11 @@
 //!              `k`, and the clause runs below them. No handler: the run stops there
 //!   Resume     the levels of a `k` are put back on top
 //!   a handler  a new level; what follows the handled program is a frame of the level below
+//!   ensuring   a frame that holds the finalizer and what follows. A value that comes to it waits while the
+//!              finalizer runs
+//!   unwinding  the levels of a `k` are put back on top, its handler GONE, and WALKED: the frames are passed with
+//!              no value, a finalizer's frame runs its finalizer, a level is left without its `ret` — down to
+//!              the frame that marks the unwinding's END, which gives `()` to what waits for it
 //!
 //! A computation is run once: it is taken by value, and a value is moved from where it is made to where it is asked
 //! for. What may be run many times is a continuation, so what a `k` holds is shared and never written: a frame that
@@ -34,6 +39,8 @@ use crate::val::Val;
 pub type State = Rc<dyn Any>;
 /// the levels of a continuation, the lowest first
 pub type Pieces = Shared<[Level]>;
+/// which unwinding: the one whose end holds this very one
+pub type To = Rc<()>;
 
 /// What the loop does next.
 pub enum Node {
@@ -97,6 +104,11 @@ pub trait Frame {
     fn last(&mut self, x: Val, m: &mut Machine) -> Node;
     /// the value given while a continuation holds the frame too: a copy of what it keeps runs
     fn again(&self, x: Val, m: &mut Machine) -> Node;
+    /// The frame passed with no value by the unwinding `to`, and what the loop does then, if the unwinding stops
+    /// here: a finalizer's frame, the unwinding's end. Any other frame is only passed.
+    fn left(&self, _to: &To, _m: &mut Machine) -> Option<Node> {
+        None
+    }
 }
 
 /// a `Kont` kept in a frame, until its value comes
@@ -125,11 +137,80 @@ impl Frame for Resumes {
     }
 }
 
+/// `ensuring`: a finalizer, and what follows the value of the program it is on. With a value, the finalizer runs
+/// and the value goes on after it; unwound, the finalizer runs and the unwinding goes on after it.
+struct Finally<F, K, A>(Option<(F, K)>, PhantomData<fn(A)>);
+
+impl<A: Clone + 'static, D: Start, F: FnOnce() -> D + Clone + 'static, K: Kont<A>> Frame for Finally<F, K, A> {
+    fn last(&mut self, x: Val, m: &mut Machine) -> Node {
+        let (finalizer, k) = self.0.take().expect("a frame is given its value once");
+        finalizer().start(Gives { a: x.take(), k }, m)
+    }
+
+    fn again(&self, x: Val, m: &mut Machine) -> Node {
+        let (finalizer, k) = self.0.clone().expect("a frame is given its value once");
+        finalizer().start(Gives { a: x.take(), k }, m)
+    }
+
+    fn left(&self, to: &To, m: &mut Machine) -> Option<Node> {
+        let (finalizer, _) = self.0.as_ref().expect("a frame is given its value once");
+        m.link(Unwinding(to.clone()));
+        Some((finalizer.clone())().start(Ret, m))
+    }
+}
+
+/// a value that waits while its finalizer runs, and what follows it
+#[derive(Clone)]
+struct Gives<A, K> {
+    a: A,
+    k: K,
+}
+
+impl<X, A: Clone + 'static, K: Kont<A>> Kont<X> for Gives<A, K> {
+    #[inline(always)]
+    fn apply(self, _: X, m: &mut Machine) -> Node {
+        self.k.apply(self.a, m)
+    }
+}
+
+/// An unwinding goes on from here: what comes here — a finalizer's value, the result of a handler in the part
+/// that is unwound — is dropped, and the frames under this one are walked.
+struct Unwinding(To);
+
+impl Frame for Unwinding {
+    fn last(&mut self, _: Val, m: &mut Machine) -> Node {
+        m.walk(&self.0)
+    }
+
+    fn again(&self, _: Val, m: &mut Machine) -> Node {
+        m.walk(&self.0)
+    }
+}
+
+/// The end of an unwinding: `()` to what waits for it. Another unwinding passes it.
+struct End(To);
+
+impl Frame for End {
+    fn last(&mut self, _: Val, _: &mut Machine) -> Node {
+        Node::Done(Val::new(()))
+    }
+
+    fn again(&self, _: Val, _: &mut Machine) -> Node {
+        Node::Done(Val::new(()))
+    }
+
+    fn left(&self, to: &To, _: &mut Machine) -> Option<Node> {
+        Rc::ptr_eq(&self.0, to).then(|| Node::Done(Val::new(())))
+    }
+}
+
 /// A handler, as the machine sees it.
 pub struct Mark {
     pub effect: TypeId,
     /// of the operations of the effect, those this handler answers; none: all of them
     pub mine: Option<Box<dyn Fn(&Val) -> bool>>,
+    /// its effect is still in the row outside it (`intercept`): gone, it lets its operations pass
+    pub keeps: bool,
     pub ret: Box<dyn Fn(State, Val, &mut Machine) -> Node>,
     pub clause: Clause,
 }
@@ -139,12 +220,28 @@ pub enum Clause {
     InPlace(Box<dyn Fn(&mut State, Val) -> Val>),
     /// a computation, given the rest of the program
     General(Rc<dyn Fn(Val, Pieces, &mut Machine) -> Node>),
+    /// WHERE A GENERAL HANDLER WAS, while its `k` is unwound: the handler it was has left, and answers nothing.
+    /// It took its effect out of the row (`handle`), so nobody is left to answer an operation of its own that a
+    /// finalizer asks: the finalizer ends there, and the unwinding — this one — goes on.
+    Gone(Rc<Mark>, To),
 }
 
 impl Mark {
     #[inline]
     fn accepts(&self, op: &Val) -> bool {
         self.effect == op.kind() && self.mine.as_ref().is_none_or(|mine| mine(op))
+    }
+
+    /// The handler `was`, gone while the unwinding `to` passes where it was.
+    fn gone(was: &Rc<Mark>, to: &To) -> Rc<Mark> {
+        let own = was.clone();
+        Rc::new(Mark {
+            effect: was.effect,
+            mine: Some(Box::new(move |op| own.accepts(op))),
+            keeps: false,
+            ret: Box::new(|_, x, _| Node::Done(x)),
+            clause: Clause::Gone(was.clone(), to.clone()),
+        })
     }
 }
 
@@ -162,6 +259,19 @@ impl Level {
     #[inline]
     fn accepts(&self, op: &Val) -> bool {
         self.handler.as_ref().is_some_and(|(mark, _)| mark.accepts(op))
+    }
+
+    /// The level as the unwinding `to` puts it back. The `lowest` is the level of the handler that unwinds: it has
+    /// left — gone, or with nothing in its place if it kept its effect in the row. A place higher up where a
+    /// handler had left before is now a place of this unwinding.
+    fn left(&self, lowest: bool, to: &To) -> Level {
+        let handler = self.handler.as_ref().and_then(|(mark, state)| match &mark.clause {
+            Clause::Gone(was, _) => Some((Mark::gone(was, to), state.clone())),
+            _ if !lowest => Some((mark.clone(), state.clone())),
+            _ if mark.keeps => None,
+            _ => Some((Mark::gone(mark, to), state.clone())),
+        });
+        Level { frames: self.frames.clone(), handler }
     }
 }
 
@@ -190,6 +300,61 @@ impl Machine {
         self.top.frames = Some(Shared::new(under, k));
     }
 
+    /// `ensuring`: a frame of the top level that holds the finalizer, and what follows the program's value.
+    pub fn ensure<A, D, F, K>(&mut self, finalizer: F, k: K)
+    where
+        A: Clone + 'static,
+        D: Start,
+        F: FnOnce() -> D + Clone + 'static,
+        K: Kont<A>,
+    {
+        self.link(Finally(Some((finalizer, k)), PhantomData))
+    }
+
+    /// A CONTINUATION UNWOUND: its levels are put back over the end of the unwinding — a frame of the top level,
+    /// which what waits for the unwinding is under — and walked. What comes out of a level on to the one below
+    /// it goes on unwinding.
+    pub fn unwind(&mut self, k: Pieces) -> Node {
+        let to = To::new(());
+        self.link(End(to.clone()));
+        for (i, level) in k.iter().enumerate() {
+            if i > 0 {
+                self.link(Unwinding(to.clone()));
+            }
+            let below = replace(&mut self.top, level.left(i == 0, &to));
+            self.under.push(below);
+        }
+        // the frames are this path's alone now, if nobody else holds `k`
+        drop(k);
+        self.walk(&to)
+    }
+
+    /// UNWINDING, to its end `to`: the frames are passed with no value, the top first. A finalizer's frame: the
+    /// finalizer runs, and the unwinding goes on after it (`Unwinding`). A level with no frame left: it is left
+    /// without its `ret`, its state dropped. The end of another unwinding, begun inside this one, is passed.
+    fn walk(&mut self, to: &To) -> Node {
+        loop {
+            match self.top.frames.take() {
+                Some(mut frame) => {
+                    self.top.frames = match frame.get_mut() {
+                        Some(alone) => alone.head.0.take(),
+                        None => frame.head.0.clone(),
+                    };
+                    if let Some(next) = frame.next.left(to, self) {
+                        return next;
+                    }
+                }
+                None => match self.under.pop() {
+                    Some(below) => self.top = below,
+                    // a continuation taken from a finalizer while it ran in an unwinding, by a handler inside the
+                    // part unwound, was kept and resumed on another stack: the finalizer has ended, and there is
+                    // no unwinding to go on with, and no value
+                    None => panic!("the rest of an unwinding was resumed outside the unwinding"),
+                },
+            }
+        }
+    }
+
     /// A new level, of a handler: its program starts with nothing waiting inside it.
     pub fn enter(&mut self, mark: Rc<Mark>, state: State) {
         let below = replace(&mut self.top, Level { frames: None, handler: Some((mark, state)) });
@@ -214,7 +379,7 @@ impl Machine {
         let (mark, state) = level.handler.as_mut().expect("the level found has a handler");
         match &mark.clause {
             Clause::InPlace(answer) => Ok(answer(state, op)),
-            Clause::General(_) => Err(op),
+            _ => Err(op),
         }
     }
 }
@@ -271,6 +436,11 @@ fn go(mut m: Machine, mut c: Node) -> Result<Val, (Val, Pieces)> {
                         let k = Shared::from_exact(levels, m.under.drain(at..).chain(once(take(&mut m.top))));
                         m.top = m.under.pop().unwrap_or_default();
                         on(op, k, &mut m)
+                    }
+                    // the finalizer that asks ends here: what waits inside it is unwound with the rest
+                    Clause::Gone(_, to) => {
+                        let to = to.clone();
+                        m.walk(&to)
                     }
                 }
             }

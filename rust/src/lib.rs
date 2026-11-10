@@ -94,6 +94,31 @@
 //! slower than straight-line code, with a frame on the heap wherever a value is waited for, and as safe for the
 //! stack.
 //!
+//! # What a program holds, released when it is left
+//!
+//! `p.ensuring(f)` is `p`, and the finalizer `f` when `p` is left: with its value, or without one — when a handler
+//! outside does not go on with the rest of the program and unwinds it. `bracket` is the acquire, use, release of
+//! it. The handlers that leave a program unwind it: `Throws::run`, `Choose::first`, `Emit::take`; one you write
+//! says `k.unwind()` before it goes on without `k` — or is made by `Handler::abort`. A `k` that is only dropped
+//! runs no finalizer.
+//!
+//! ```
+//! use okay_effects::effects::{Throws, Writer};
+//! use okay_effects::{Prog, bracket, eff, pure};
+//!
+//! type Files = eff![Writer<String>, Throws<String>];
+//!
+//! fn read(fails: bool) -> impl Prog<usize, Files> {
+//!     let open = Writer::tell("open".to_string()).map(|()| "file");
+//!     let used = move |f: &str| if fails { Throws::raise(format!("no {f}")).boxed() } else { pure(f.len()).boxed() };
+//!     bracket(open, used, |f| Writer::tell(format!("close {f}")))
+//! }
+//!
+//! let told = vec!["open".to_string(), "close file".to_string()];
+//! assert_eq!(Writer::run(Throws::run(read(false))).run(), (told.clone(), Ok(4)));
+//! assert_eq!(Writer::run(Throws::run(read(true))).run(), (told, Err("no file".to_string())));
+//! ```
+//!
 //! # What rustc refuses
 //!
 //! An effect left in the row: the program does not run.
@@ -228,6 +253,34 @@ pub trait Prog<A: 'static, R: 'static>: Start<Row = R, Out = A> {
     /// The computation after this one, whose value is not needed.
     fn then<B: 'static, D: Prog<B, R>, F: FnOnce() -> D + Clone + 'static>(self, next: F) -> Then<Self, F> {
         Then { c: self, f: next }
+    }
+
+    /// THIS PROGRAM, AND `finalizer` WHEN IT IS LEFT. With a value: the finalizer runs, and the value is this
+    /// program's. Without one — a handler outside does not go on with the rest of the program this one is part
+    /// of, and unwinds it (`K::unwind`: a failure, the first of the choices, a stream cut short): the finalizer
+    /// runs then, where it was installed — the handlers between it and the one that leaves still answer it, their
+    /// states as the path left them. Finalizers run the innermost first, each once for every path that ends or
+    /// is unwound past it. The finalizer is a program of the same row, made when it is run; its value is dropped.
+    /// One that fails is left as any program is: what waits beyond it is still unwound, and the failure goes to
+    /// its handler. NOT RUN: when the rest of the program is kept and never resumed (an `Emit::pull` not read to
+    /// its end) or just dropped — a `k` let go runs nothing, only `unwind` does —, and when the host panics.
+    ///
+    /// The value waits while the finalizer runs, and a continuation taken there may be resumed twice: it is
+    /// `Clone`, as what a closure holds is.
+    ///
+    /// ```
+    /// use okay_effects::effects::{State, Throws};
+    /// use okay_effects::{Prog, eff};
+    ///
+    /// let failing = State::put::<eff![State<i64>, Throws<String>], _>(5).then(|| Throws::raise("no".to_string()));
+    /// let closed = failing.map(|()| 1).ensuring(|| State::modify(|s: i64| s + 1));
+    /// assert_eq!(State::run(0, Throws::run(closed)).run(), (6, Err("no".to_string())));
+    /// ```
+    fn ensuring<X: 'static, D: Prog<X, R>, F: FnOnce() -> D + Clone + 'static>(self, finalizer: F) -> Ensuring<Self, F>
+    where
+        A: Clone,
+    {
+        Ensuring { c: self, f: finalizer }
     }
 
     /// THE BOUNDARY: the computation with its type forgotten — kept in place if it is small, in a box if not.
@@ -396,6 +449,35 @@ impl<A, D: Start, F: FnOnce() -> D + Clone + 'static, K: Kont<D::Out>> Kont<A> f
     }
 }
 
+/// A computation, and the finalizer that runs when it is left: with its value, or unwound (`Prog::ensuring`).
+pub struct Ensuring<C, F> {
+    c: C,
+    f: F,
+}
+
+impl<C: Start, D: Start<Row = C::Row>, F: FnOnce() -> D + Clone + 'static> Start for Ensuring<C, F>
+where
+    C::Out: Clone,
+{
+    type Row = C::Row;
+    type Out = C::Out;
+
+    /// a boundary, as a handler is: the machine sees the finalizer's frame, and what follows is in it
+    fn start<K: Kont<C::Out>>(self, k: K, m: &mut Machine) -> Node {
+        m.ensure(self.f, k);
+        self.c.start(Ret, m)
+    }
+}
+
+/// `acquire`d, used, `release`d when the use is left: `ensuring` of the use.
+pub fn bracket<S: Clone + 'static, A: Clone + 'static, R: 'static, X: 'static, U: Prog<A, R>, D: Prog<X, R>>(
+    acquire: impl Prog<S, R>,
+    using: impl FnOnce(S) -> U + Clone + 'static,
+    release: impl FnOnce(S) -> D + Clone + 'static,
+) -> impl Prog<A, R> {
+    acquire.flat_map(move |s: S| using(s.clone()).ensuring(move || release(s)))
+}
+
 /// A computation built when it is reached: a call in tail position takes no stack.
 pub fn defer<A: 'static, R: 'static, D: Prog<A, R>>(p: impl FnOnce() -> D + Clone + 'static) -> Comp<A, R> {
     pure(()).then(p).boxed()
@@ -439,6 +521,7 @@ impl<X: 'static> Reply<X> {
 }
 
 /// What answers an operation that is never answered: no value.
+#[derive(Clone, Copy)]
 pub enum Never {}
 
 /// An operation of the effect `E`, answered by an `X`.
@@ -494,12 +577,25 @@ impl<A: 'static, R: 'static> Asked<A, R> {
     pub fn resume<X: 'static>(&self, reply: Reply<X>, x: X) -> Resumed<A, R> {
         self.k.resume(reply, x)
     }
+
+    /// The rest left: its finalizers run (`K::unwind`).
+    pub fn unwind(&self) -> Unwound<R> {
+        self.k.unwind()
+    }
 }
 
 // -- HANDLERS
 
 /// The rest of a handled program, waiting for the answer of the operation it asked: a value, to resume once,
 /// many times, later, or never. It comes to a `B`, asking the row `R`.
+///
+/// And `unwind` LEAVES it: the finalizers that wait in it (`ensuring`) run, the innermost first, and nothing else
+/// of it does. A clause that does not go on with the rest of the program says `k.unwind()` first, so that what
+/// the program holds is released. A `k` is a value, and nothing is remembered of what was done with it: every
+/// resumption is a path, which runs its finalizers at its end, and every unwinding is the end of a path — unwound
+/// twice, the finalizers run twice. A clause that neither resumes nor unwinds `k` runs nothing of it: the rest of
+/// the program is kept, and may be resumed later (`Async`). LETTING A `k` GO — dropping it, as Rust drops any value
+/// — RUNS NO FINALIZER: only `unwind` does.
 pub struct K<B, R> {
     k: Pieces,
     of: PhantomData<fn() -> (B, R)>,
@@ -523,6 +619,36 @@ impl<B: 'static, R: 'static> K<B, R> {
         R: Has<E, I>,
     {
         Passed { k: self.k.clone(), op: Val::new(op), of: PhantomData }
+    }
+
+    /// The rest LEFT: its finalizers run, the innermost first, each where it was installed — the handlers of
+    /// `k` still answer it, their states as `k` holds them —, then `()`. Nothing else of `k` runs: no function
+    /// of a bind, no `ret` of a handler inside it; their states are dropped. The handler that unwinds has left:
+    /// an operation of its own that a finalizer asks then is not answered by it — it goes to the handler outside,
+    /// if this one kept its effect in the row (`intercept`), and else the finalizer ends there. A failure of a
+    /// finalizer answered inside what is unwound does not stop the unwinding.
+    ///
+    /// One thing is refused, by a panic: a continuation taken from a finalizer while it ran in an unwinding, by
+    /// a handler inside the part unwound, then kept and resumed on another stack — the finalizer ends, and there
+    /// is no unwinding to go on with, and no value.
+    pub fn unwind(&self) -> Unwound<R> {
+        Unwound { k: self.k.clone(), of: PhantomData }
+    }
+}
+
+/// A continuation unwound: a computation of the row outside its handler, that gives nothing.
+pub struct Unwound<R> {
+    k: Pieces,
+    of: PhantomData<fn() -> R>,
+}
+
+impl<R: 'static> Start for Unwound<R> {
+    type Row = R;
+    type Out = ();
+
+    fn start<Kn: Kont<()>>(self, k: Kn, m: &mut Machine) -> Node {
+        m.push(k);
+        m.unwind(self.k)
     }
 }
 
@@ -569,15 +695,29 @@ pub struct Handler<E, A, B, R> {
 }
 
 impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
-    /// THE GENERAL HANDLER. A clause is given the rest of the program, `k`, as a value.
+    /// THE GENERAL HANDLER. A clause is given the rest of the program, `k`, as a value: to resume once, many
+    /// times, or later; or to unwind.
     pub fn new<P: Prog<B, R>, Q: Prog<B, R>>(
         ret: impl Fn(A) -> P + 'static,
         on: impl Fn(E, K<B, R>) -> Q + 'static,
     ) -> Self {
         let ret = Box::new(move |_, a: Val, m: &mut Machine| ret(a.take()).start(Ret, m));
         let on = Rc::new(move |op: Val, k, m: &mut Machine| on(op.take(), K { k, of: PhantomData }).start(Ret, m));
-        let mark = Mark { effect: TypeId::of::<E>(), mine: None, ret, clause: Clause::General(on) };
+        let mark = Mark { effect: TypeId::of::<E>(), mine: None, keeps: false, ret, clause: Clause::General(on) };
         Handler { mark, state: Rc::new(()), of: PhantomData }
+    }
+
+    /// EACH OPERATION ENDS THE PROGRAM: `abort`'s is the handler's result — a general handler that unwinds `k`,
+    /// then goes on with `abort`. The operation waits while the finalizers run, so it is `Clone`.
+    pub fn abort<P: Prog<B, R>, Q: Prog<B, R>>(ret: impl Fn(A) -> P + 'static, abort: impl Fn(E) -> Q + 'static) -> Self
+    where
+        E: Clone,
+    {
+        let abort = Rc::new(abort);
+        Handler::new(ret, move |op: E, k: K<B, R>| {
+            let abort = abort.clone();
+            k.unwind().then(move || abort(op))
+        })
     }
 
     /// THE HANDLER IN PLACE: every operation answered at once, from a state the handler keeps — nothing is
@@ -590,7 +730,7 @@ impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
     ) -> Self {
         let ret = Box::new(move |state, a: Val, m: &mut Machine| ret(taken(state), a.take()).start(Ret, m));
         let answer = Box::new(move |state: &mut State, op: Val| answer(written(state), op.take()).0);
-        let mark = Mark { effect: TypeId::of::<E>(), mine: None, ret, clause: Clause::InPlace(answer) };
+        let mark = Mark { effect: TypeId::of::<E>(), mine: None, keeps: false, ret, clause: Clause::InPlace(answer) };
         Handler { mark, state: Rc::new(s0), of: PhantomData }
     }
 
@@ -610,7 +750,8 @@ impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
     where
         R: Has<E, I>,
     {
-        Handled { mark: Rc::new(self.mark), state: self.state, body: p, of: PhantomData }
+        let mark = Mark { keeps: true, ..self.mark };
+        Handled { mark: Rc::new(mark), state: self.state, body: p, of: PhantomData }
     }
 }
 

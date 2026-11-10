@@ -72,18 +72,19 @@ impl<T: Clone + 'static> Emit<T> {
         Handler::new(pure, on).intercept(p)
     }
 
-    /// A stream of the first `n` values; the producer is not resumed after them.
+    /// A stream of the first `n` values; the producer is not resumed after them: it is left there, unwound. What
+    /// its finalizers send then goes to the stream's handler, past this cut.
     pub fn take<R: Has<Self, I>, I: 'static, A: 'static>(n: usize, p: impl Prog<A, R>) -> impl Prog<(), R> {
         // what is sent on depends on how many are still wanted: the handler answers with a function of that
         type Left<R> = Rc<dyn Fn(usize) -> Comp<(), R>>;
         let on = |op: Self, k: K<Left<R>, R>| match op {
             Emit::Send(value, r) => pure(Rc::new(move |left| {
                 if left == 0 {
-                    return pure(()).boxed();
+                    return k.unwind().boxed();
                 }
                 let k = k.clone();
                 let rest = move |_| match left {
-                    1 => pure(()).boxed(),
+                    1 => k.unwind().boxed(),
                     _ => k.resume(r, ()).flat_map(move |rest: Left<R>| rest(left - 1)).boxed(),
                 };
                 Self::send(value.clone()).flat_map(rest).boxed()
@@ -93,7 +94,11 @@ impl<T: Clone + 'static> Emit<T> {
         Handler::new(none, on).intercept(p).flat_map(move |all| all(n))
     }
 
-    /// The values, pulled as they are needed: the producer runs no further than was asked.
+    /// The values, pulled as they are needed: the producer runs no further than was asked. NOT READ TO ITS END,
+    /// the iterator keeps the rest of the producer and nobody leaves it — dropped, it is only let go: its
+    /// finalizers (`ensuring`) do not run. A producer that holds something is read to its end, or cut by `take`
+    /// before it is pulled: `pull(take(n, p))`. The same holds of `zip` and `merge`, which pull: of the stream
+    /// that is not read to its end.
     pub fn pull<A: 'static>(p: impl Prog<A, eff![Emit<T>]>) -> Pull<T> {
         let on = |op, k| match op {
             Emit::Send(value, r) => pure(Sent(Some((value, r, k)))),

@@ -97,7 +97,8 @@ impl<W: Clone + 'static> Writer<W> {
     }
 }
 
-/// THROWS: the rest of the program is dropped.
+/// THROWS: the rest of the program is left — unwound, its finalizers run — before the failure is answered. The
+/// failure waits while they run, so a handler asks that it is `Clone`.
 pub enum Throws<E> {
     Raise(E, Reply<Never>),
 }
@@ -107,9 +108,12 @@ impl<E: 'static> Throws<E> {
         perform(|r| Throws::Raise(error, r)).map(|never: Never| match never {})
     }
 
-    pub fn run<R: Has<Self, I>, I, A: 'static>(p: impl Prog<A, R>) -> impl Prog<Result<A, E>, R::Rest> {
-        let on = |op, _| match op {
-            Throws::Raise(error, _) => pure(Err(error)),
+    pub fn run<R: Has<Self, I>, I, A: 'static>(p: impl Prog<A, R>) -> impl Prog<Result<A, E>, R::Rest>
+    where
+        E: Clone,
+    {
+        let on = |op, k: K<Result<A, E>, R::Rest>| match op {
+            Throws::Raise(error, _) => k.unwind().then(move || pure(Err(error))),
         };
         Handler::new(|a| pure(Ok(a)), on).handle(p)
     }
@@ -118,15 +122,23 @@ impl<E: 'static> Throws<E> {
     pub fn recover<R: Has<Self, I>, I, A: 'static, P: Prog<A, R::Rest>>(
         rescue: impl Fn(E) -> P + 'static,
         p: impl Prog<A, R>,
-    ) -> impl Prog<A, R::Rest> {
-        let on = move |op, _| match op {
-            Throws::Raise(error, _) => rescue(error),
+    ) -> impl Prog<A, R::Rest>
+    where
+        E: Clone,
+    {
+        let rescue = Rc::new(rescue);
+        let on = move |op, k: K<A, R::Rest>| match op {
+            Throws::Raise(error, _) => {
+                let rescue = rescue.clone();
+                k.unwind().then(move || rescue(error))
+            }
         };
         Handler::new(pure, on).handle(p)
     }
 }
 
-/// CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times.
+/// CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times. With no
+/// value it is left: unwound.
 pub enum Choose {
     /// one of so many: which
     Among(usize, Reply<usize>),
@@ -166,13 +178,14 @@ impl Choose {
             found.extend(more);
             found
         }
-        let on = |op, k| match op {
+        let on = |op, k: K<Vec<A>, R::Rest>| match op {
+            Choose::Among(0, _) => k.unwind().map(|_| Vec::new()).boxed(),
             Choose::Among(n, r) => from(k, r, (0, n), Vec::new()),
         };
         Handler::new(|a| pure(vec![a]), on).handle(p)
     }
 
-    /// The first value the program comes to, the other paths not taken.
+    /// The first value the program comes to, the other paths not taken: they were not begun, and hold nothing.
     pub fn first<R: Has<Self, I>, I, A: 'static>(p: impl Prog<A, R>) -> impl Prog<Option<A>, R::Rest> {
         // the first value of the paths from the `i`-th of `n` on
         fn from<T: 'static, A: 'static>(
@@ -190,7 +203,8 @@ impl Choose {
             })
             .boxed()
         }
-        let on = |op, k| match op {
+        let on = |op, k: K<Option<A>, R::Rest>| match op {
+            Choose::Among(0, _) => k.unwind().map(|_| None).boxed(),
             Choose::Among(n, r) => from(k, r, (0, n)),
         };
         Handler::new(|a| pure(Some(a)), on).handle(p)
