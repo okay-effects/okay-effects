@@ -47,20 +47,22 @@ Reader and Writer answer in all of them. The last line is checked by programs th
 A choice of 1 or 2, added to a state. Handlers in one order give each path its own state; in the other, one state
 goes through all paths.
 
-Scala 3 — the row is a type constructor, its effects in order. The program is written over any row `R` that has its
-effects; where they are in it, the compiler finds. A handler takes its effect out from wherever it is:
+Scala 3 — the row is a type constructor, its effects in order. A word (`Choose.among`, `State.get`) says no row: it
+takes the row of the program's declared type, and the compiler finds where its effect is there. A handler takes its
+effect out from wherever it is:
 
 ```scala
 import okay.effects.scala.*, std.*
 
-def p[R[_]: Has[State % Int] : Has[Choose]]: Int ! R =
-  for x <- Choose.among(1, 2); s <- State.get; _ <- State.put(s + x) yield s + x
+val p: Int ! State % Int + Choose =
+  for x <- Choose.among(1, 2); s <- State.get[Int]; _ <- State.put(s + x) yield s + x
 
-type App[X] = (State % Int + Choose)[X]
-
-run(Choose.all(State.run(0)(p[App])))   // List((1, 1), (2, 2))
-run(State.run(0)(Choose.all(p[App])))   // (3, List(1, 3))
+run(Choose.all(State.run(0)(p)))   // List((1, 1), (2, 2))
+run(State.run(0)(Choose.all(p)))   // (3, List(1, 3))
 ```
+
+Written over any row that has its effects, the program is `def p[R[_]: Has[State % Int] : Has[Choose]]: Int ! R`
+with the same body (`State.get` there needs no `[Int]`), and is used as `p[App]`.
 
 Java 25 — the row is a nested type, the result first, in the order of the handlers. `up` moves a computation one
 handler further, so the program is written once for each order:
@@ -83,13 +85,13 @@ run(State.run(0, Choose.all(q())));   // Final[state=3, value=[1, 3]]
 ```
 
 Rust — the row is a list of types; where an effect is in it is inferred. A computation is run once, so the
-program is a function. Its type is its shape, a struct of structs, and is not written: the function says `impl Comp`:
+program is a function. Its type is its shape, a struct of structs, and is not written: the function says `impl Prog`:
 
 ```rust
 use okay_effects::effects::{Choose, State};
-use okay_effects::{Comp, row};
+use okay_effects::{Prog, eff};
 
-fn p() -> impl Comp<row![State<i64>, Choose], i64> {
+fn p() -> impl Prog<i64, eff![State<i64>, Choose]> {
     Choose::among(vec![1, 2])
         .flat_map(|x| State::get().flat_map(move |s: i64| State::put(s + x).map(move |_| s + x)))
 }
@@ -109,8 +111,8 @@ enum State[S, X]:                       // the operations of `State % S`; the la
   case Put[S](s: S) extends State[S, Unit]
 
 object State:
-  def get[S, R[_]](using In[State % S, R]): S ! R = perform[State % S](Get())
-  def put[S, R[_]](s: S)(using In[State % S, R]): Unit ! R = perform[State % S](Put(s))
+  def get[S]: Word[State % S, S] = word(Get())            // a word: the operation, not yet placed in a row
+  def put[S](s: S): Word[State % S, Unit] = word(Put(s))
 
   def run[S, R[_], Rest[_], A](init: S)(p: A ! R)(using Split[State % S, R, Rest]): (S, A) ! Rest =
     handle(p, Handler.stateful[State % S, Rest, A, (S, A), S](init)((s, a) => pure((s, a)))(
@@ -121,8 +123,8 @@ object State:
 
 ```java
 public sealed interface State<S> {
-  record Get<S>() implements State<S>, Op<State<S>, S> {}
-  record Put<S>(S value) implements State<S>, Op<State<S>, Void> {}
+  record Get<S>() implements State<S>, Op<State<S>, S, Get<S>> {}   // effect, answer, the record itself
+  record Put<S>(S value) implements State<S>, Op<State<S>, Void, Put<S>> {}
   record Final<S, A>(S state, A value) {}
 
   static <S, A, R> Comp<Final<S, A>, R> run(S s0, Comp<A, ? super Eff<State<S>, R>> p) {
@@ -146,7 +148,7 @@ pub enum State<S> {
 }
 
 impl<S: Clone + 'static> State<S> {
-    pub fn run<R: Has<Self, I>, I, A: 'static>(s0: S, p: impl Comp<R, A>) -> impl Comp<R::Rest, (S, A)> {
+    pub fn run<R: Has<Self, I>, I, A: 'static>(s0: S, p: impl Prog<A, R>) -> impl Prog<(S, A), R::Rest> {
         let answer = |state: &mut S, op| match op {
             State::Get(r) => r.give(state.clone()),
             State::Put(s, r) => {
@@ -174,14 +176,20 @@ def all[R[_], Rest[_], A](p: A ! R)(using Split[Choose, R, Rest]): List[A] ! Res
 
 Scala makes a handler by `Handler.general`, `tail` (in place, no state), `stateful` (in place) or `abort` (`k`
 dropped). In Java the clause is `Comp<B, R> on(F op, K<B, R> k)` and resumes with `k.resume(op, answer)`; in Rust
-it is a closure from `(E, K<R, B>)` to an `impl Comp<R, B>`, given to `Handler::new(ret, on)`, and resumes with
+it is a closure from `(E, K<B, R>)` to an `impl Prog<B, R>`, given to `Handler::new(ret, on)`, and resumes with
 `k.resume(reply, answer)`.
+
+An operation is asked by a word. In Scala a word is `word(op)`, a `Word[E, X]`: the operation itself at run time,
+placed in a row where it is used; an effect's own words need no evidence (`def deposit(amount: Int) =
+word(Deposit(amount))`), and `perform[E](op)` places an operation at once, by an evidence. In Java it is
+`perform(op)`, a `Comp<X, Eff<E, ?>>`; in Rust `perform(State::Get)`, of any row `R: Has<E, I>`.
 
 The standard effects, in each language: State, Reader (with `local`), Writer, Throws (with `recover`), Choose
 (`all`, `first`), Fresh, Clock, Emit (streams: collect, each, map, filter, take, pull, zip, merge) and Async
 (callbacks and continuations: await — `wait` in Rust — sleep, start, both, all, race). On the JVM Async has
 `toFuture`, `fromFuture` and `runBlocking` and sleeps on a timer thread; in Rust time is a `Timers` queue the
-caller runs.
+caller runs. Scala has two of the family's other names as aliases (`std/Family.scala`): `Fail` for `Throws` and
+`Yield` for `Emit`, with the words `Fail.recover`, `Yield.emit`, `Yield.foreach`, `Fresh.next`.
 
 ## Compatible: with each other, and with the family
 
@@ -199,14 +207,17 @@ caller runs.
 
 | | Scala 3 | Java 25 | Rust |
 |---|---|---|---|
-| the row | a type constructor, the effects in order: `A ! State % Int + Choose`, empty row `Pure`; a program is over any `R[_]: Has[State % Int]`; the evidence (`In`, `Split`) is found by the compiler | a nested type with wildcards, `Comp<A, Eff<State<Integer>, Eff<Choose, ?>>>`, empty row `Pure`; positional: `up`, `under`, `fit` | a type-level list, `impl Comp<row![State<i64>, Choose], A>`, empty row `()`; membership inferred (`Has<E, I>`); `embed`, `also` where it is not |
-| how a handler is found | by the effect's place in the row: the evidence is that place, an `Int`; no class is looked at | by the operation's position in the row: it carries how many row levels it skips (`up`, `under`); an interceptor by the class of the operation | by the effect's `TypeId`, type arguments included: the nearest handler of it that says `mine` |
+| the row | a type constructor, the effects in order: `A ! State % Int + Choose`, empty row `Pure`; a program has a declared row, or is over any `R[_]: Has[State % Int]`; the evidence (`In`, `Split`, `Sub`) is found by the compiler | a nested type with wildcards, `Comp<A, Eff<State<Integer>, Eff<Choose, ?>>>`, empty row `Pure`; positional | a type-level list, `impl Prog<A, eff![State<i64>, Choose]>`, empty row `()`; membership inferred (`Has<E, I>`) |
+| a program of a smaller row in a bigger one | `p.into[S]`, the effects in any order (`Sub[R, S]`); never without `into` | `up`, `under`, `fit`: the order of the handlers is kept | inferred for a program generic in its row; `embed`, `also` for one of a fixed row |
+| a handler takes its effect out | from any place; what is left is the row as one would write it: `State % Int + Choose` without the state is `Choose` | from the front of the row only | from any place (`Has::Rest`) |
+| how a handler is found | by the effect's place in the row: the evidence is that place, an `Int`; a program put into a row with other places runs under a level that renames them; no class is looked at | by the operation's position in the row: it carries how many row levels it skips (`up`, `under`); its class is not tested; an interceptor by the class of the operation | by the effect's `TypeId`, type arguments included: the nearest handler of it that says `mine` |
 | one effect twice in a row | two places: the compiler finds the last, the other is named (`Place.init`) | two positions: `Eff<Reader<String>, Eff<Reader<Integer>, ?>>` | told apart by its type arguments; of one type, by an identity in the operation and `mine` |
 | an effect left unhandled | compile error, naming the effect and the row: `run` takes `A ! Pure` | compile error: `run` takes `Comp<A, ? super Pure>` | compile error: `run` asks `R: Closed`, which only `()` is |
+| an operation not of the effect it names | compile error: `word` and `perform[E]` take an `E[X]` | compile error: `Op<E, X, Self extends E>` where the class is declared; `perform`, for a class that names another as itself | cannot be written: an operation is a variant of the effect's enum |
 | an answer of the wrong type | compile error (GADT match) | compile error (the operation is the witness: `k.resume(get, s)`) | compile error (`Reply<X>` gives only an `X`) |
 | a handler missing a case | compile error (the exhaustivity warning, under `-Werror`) | compile error (`switch` over the sealed interface) | compile error (`match` over the enum) |
-| casts and `unsafe` in the kernel | 9 `asInstanceOf`: 8 in `Machine.scala`, 1 in `Effects.scala` (`Step.Asked.of`); none in `Rows.scala` or `std` | `Machine.java` is raw and unchecked; one unchecked cast in `Effects`, behind `up`, `under`, `fit` | `unsafe` in `val.rs`, `pool.rs` and `erased.rs`; a value is taken out by its `TypeId` |
-| where a program's type is forgotten | nowhere: a program is `A ! R` whatever its shape | nowhere: `Comp<A, R>` | where `.boxed()` says: it gives `Dyn<R, A>`, needed at recursion, at branches of different shapes, and for a program kept as a value |
+| casts and `unsafe` in the kernel | 12 `asInstanceOf`: 8 in `Machine.scala`, 4 in `Effects.scala` (`Step.Asked.of`, an `into` that changes no place, two for a bound `if`); none in `Rows.scala` or `std` | `Machine.java` is raw and unchecked: a handler is given an operation as its effect with no test; one unchecked cast in `Effects`, behind `up`, `under`, `fit` | `unsafe` in `val.rs`, `pool.rs` and `erased.rs`; a value is taken out by its `TypeId` |
+| where a program's type is forgotten | nowhere: a program is `A ! R` whatever its shape | nowhere: `Comp<A, R>` | where `.boxed()` says: it gives `Comp<A, R>`, needed at recursion, at branches of different shapes, and for a program kept as a value |
 | a computation run many times | yes: immutable data | yes: immutable data | no: `run` and `step` take it by value; build it by a function |
 | a continuation resumed many times | yes | yes | yes (`K` is `Clone`; a state in place and what a closure holds are `Clone`) |
 | threads | `k` may be resumed from any thread (Async's timer does) | the same | one thread: `Rc`, a thread-local pool |
@@ -234,7 +245,8 @@ continuations and boxed values come from a thread-local pool (`rust/src/pool.rs`
 ```
 SPEC.md     the model: data, the machine's rules, laws, rows, conformance
 scala/      scala-cli. src/Effects.scala the typed surface, Rows.scala the rows and places, Messages.scala the
-            compile errors, Machine.scala the loop, src/std the effects, src/wire the wire, src/bench; test/ (munit)
+            compile errors, Machine.scala the loop, src/std the effects (Family.scala the family's other names),
+            src/wire the wire, src/bench; test/ (munit)
 java/       javac, no build tool. src/okay/effects/java: Effects, Comp, Eff, Pure, Op, Handler, InPlace, K, Cell,
             Step, Machine; std/, wire/, bench/; test/; negative/ the programs javac must refuse
 rust/       cargo, no dependencies. src/lib.rs the typed surface, machine.rs, erased.rs, val.rs, pool.rs,
@@ -244,7 +256,7 @@ test.sh     everything
 ```
 
 `./test.sh` needs scala-cli, a JDK 25 or newer and cargo, and takes about a minute. It runs the three test suites
-(Scala 50 tests; Java 25 properties, 25 wire tests and 5 programs refused by javac; Rust 68 tests, compile-fail
+(Scala 61 tests; Java 25 properties, 25 wire tests and 6 programs refused by javac; Rust 68 tests, compile-fail
 doctests among them), every worker against the 6 transcripts, and the nine host–worker pairs.
 
 ```
@@ -255,20 +267,22 @@ cd rust && cargo run --release --example bench
 
 ## Limits
 
-- **Scala: a word takes its row from an evidence in scope, or is told it.** With neither it takes the row of its one
-  effect: `val q: Int ! App = Choose.among(1, 2).map(_ + 1)` does not compile, the head being an `Int ! Choose`.
-  A program over several effects is a `def p[R[_]: Has[A] : Has[B]]: X ! R`, or each of its words says the row:
-  `Choose.among[Int, App](1, 2)`.
-- **Scala has no embedding of rows.** A program of a fixed row is not one of a longer row: an
-  `Int ! State % Int` is refused where an `Int ! State % Int + Choose` is wanted, and nothing converts it. A
-  handler leaves the row as it is written, its effect taken out: `State % Int + Choose` without the state is
-  `Pure + Choose`, another type than `Choose`. Programs meant to be reused are written over any `R`.
+- **Scala: a word takes its row from the program's declared type, or from an evidence in scope.** With neither it
+  is a program of its one effect. So a program of two effects with no declared type is refused:
+  `State.run(0)(for x <- Choose.among(1, 2); _ <- State.put(x) yield x)` does not compile, and the error says how a
+  row is said; its first word says it: `Choose.among(1, 2).into[App]`. Under a declared row, `State.get` bound in a
+  `for` says its type, `State.get[Int]`: the row gives it too late for the function that follows.
+- **Scala: only a word is placed without being told.** A program generic in its row (`State.modify`,
+  `Emit.sendAll`, any `def p[R[_]: Has[..]]`) is taken as it is where the declared type expects it; bound inside a
+  `for` of a declared row it says the row: `State.modify[Int, App](_ + x)`, `p[App]`. A program of a smaller row
+  is never one of a bigger row by itself: it says `.into` (`small.into[App]` inside a `for`). Of the two branches
+  of a bound `if` that are words of two effects, one says `.into[App]`.
+- **Scala: `into` is free only sometimes.** It costs nothing when every effect keeps its place (the smaller row is
+  the end of the bigger one), and one allocation for a single operation. Any other program runs under one more
+  level of the machine, which the search for a handler passes.
 - **Java rows are positional.** A program names its effects in the order of its handlers and is moved with `up`,
   `under` and `fit`. `perform` gives a row open only after its first effect; a row meant to be used inside longer
   rows is written open at every step: `Eff<State<Integer>, ? extends Eff<Choose, ?>>`.
-- **Java does not tie an operation's class to its effect.** `Op<E, X>` does not ask the class to implement `E`:
-  `record Bad() implements Op<State<Integer>, Integer> {}` is performed and sent to the state's handler, whose
-  clause fails with `ClassCastException` (under `java -ea`, the machine's `AssertionError` before it).
 - **Java intercepts by class only an effect without type arguments.** `intercept` takes a `Class<F>`, which a
   generic effect has not (`java/negative/WrongIntercept.java`); such an effect is intercepted at its place, by
   `handle(.., under(p))`, as `Reader.local` is. An interceptor by class is given every operation of its
@@ -279,7 +293,7 @@ cd rust && cargo run --release --example bench
 - **Rust finds a handler by the effect's type, not its place.** One effect type twice in a row is not two places:
   rustc cannot infer which is meant, and at run time the nearest handler of the type answers. Two handlers of one
   type are told apart by an identity in the operation and `mine`, as in the TCK (`rust/tests/tck.rs`).
-- **Rust asks for `.boxed()` and `Clone`.** A function that calls itself returns `Dyn<R, A>`, and branches of
+- **Rust asks for `.boxed()` and `Clone`.** A function that calls itself returns `Comp<A, R>`, and branches of
   different shapes each end with `.boxed()`; without them rustc refuses the program. A closure given to
   `flat_map`, `map`, `then` or `defer` is `FnOnce + Clone`: what it holds must be `Clone`, and is copied when a
   continuation is resumed again.

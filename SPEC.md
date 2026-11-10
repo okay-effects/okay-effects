@@ -37,7 +37,8 @@ Step A  =  Done a | Asked op k
 Levels and frames are never written after they are made. A continuation shares them with the stack it was taken
 from. (Rust, with no collector, writes a frame or a state only while nothing else holds it, and copies a state
 shared with a `k` before writing it. Its `Bind` is a struct composed by the compiler: a frame is made only where
-what follows must wait as a value — at an operation answered generally, a handler, a `Dyn`, a resumed `k`.)
+what follows must wait as a value — at an operation answered generally, a handler, a boxed computation, a resumed
+`k`.)
 
 ## 3. The machine
 
@@ -167,16 +168,25 @@ given the operation first. Handlers of other entries are passed, whatever their 
 same effect. With no handler left, `step` stops (§8). The three kernels decide "of that entry" in three ways.
 
 - **Scala 3: by place.** `Comp[R[_], +A]`, written `A ! R`. A row is a type constructor: an effect (`Choose`,
-  `State % Int`), `Pure`, or `R + E` — the effects in order. `perform[E](op)` needs an `In[E, R]`. `handle(p, h)`
-  needs a `Split[E, R, Rest]` and gives `B ! Rest`; `intercept` needs an `In[E, R]` and gives `B ! R`. `flatMap`
-  needs one row on both sides. `run` takes `A ! Pure`. The evidence is found by the compiler and is the effect's
-  place, a number: 0 the last effect of the row, 1 the one before it. `Ask` carries it, and a mark has its
-  handler's. Walking down, a level whose place is the operation's accepts it; past a level put by `handle` with a
-  smaller place the operation's number is one less; an interceptor changes no number. No class is looked at. One
-  effect twice in a row is two places: the compiler finds the last, `Place.init` names the other. This is the
-  requirement, exactly.
+  `State % Int`), `Pure`, or `R + E` — the effects in order. An operation is first a *word*, `word(op)`: a
+  `Word[E, X]`, of no row, and at run time the operation itself. Bound in a program, or used where a program is
+  expected, it is an `Ask` in that program's row and needs an `In[E, R]`; `perform[E](op)` is the `Ask` at once.
+  `handle(p, h)` needs a `Split[E, R, Rest]` and gives `B ! Rest`, the row as one would write it:
+  `State % Int + Choose` without the state is `Choose`. `intercept` needs an `In[E, R]` and gives `B ! R`.
+  `flatMap` needs one row on both sides. `run` takes `A ! Pure`. The evidence is found by the compiler and is the
+  effect's place, a number: 0 the last effect of the row, 1 the one before it. `Ask` carries it, and a mark has
+  its handler's. Walking down, a level whose place is the operation's accepts it; past a level put by `handle`
+  with a smaller place the operation's number is one less; an interceptor changes no number. `p.into[S]` needs a
+  `Sub[R, S]`: for every place of `R`, its place in `S`. Where no number changes it is `p` itself; one operation
+  is asked at its new place; any other program runs under a *renaming level*: a level with no handler, past which
+  an operation has its place in `S`. It is popped with its value and is part of a `k` like any level. No class is
+  looked at. One effect twice in a row is two places: the compiler finds the last, `Place.init` names the other.
+  This is the requirement, exactly.
 - **Java 25: by position.** `Comp<A, R>`. The row is a nested type in the order of the handlers, nearest first:
-  `Eff<State<Integer>, Eff<Choose, ?>>`; the empty row is `Pure`. `perform` gives `Comp<X, Eff<E, ?>>`. `flatMap`
+  `Eff<State<Integer>, Eff<Choose, ?>>`; the empty row is `Pure`. An operation's class names its effect, its
+  answer and itself: `Op<E, X, Self extends E>`. `perform` takes an `O extends Op<E, X, ? super O>` and gives
+  `Comp<X, Eff<E, ?>>`: javac refuses a class that names itself and is not an `E`, and at `perform` one that names
+  another class. So every operation asked is of its effect, and its handler is given it with no test. `flatMap`
   infers a row `Q extends R` that fits both sides. `handle` takes a `Comp<A, ? super Eff<F, R>>` and gives
   `Comp<B, R>`. `run` takes `Comp<A, ? super Pure>`. `Ask` carries a count of the row levels it skips, 0 from
   `perform`. A level put by `handle` is a row level: it accepts an operation whose count is 0, and takes one off
@@ -187,9 +197,9 @@ same effect. With no handler left, `step` stops (§8). The three kernels decide 
   row: its level is no row level, and accepts an operation that passes it when the operation is of the
   interceptor's class and `mine` — whatever entry it was going to. It takes a `Class<F>`, so an effect with type
   arguments is refused; such an effect is intercepted at its entry by `handle(.., under(p))`. The class given to
-  `handle` is only asserted (`java -ea`).
-- **Rust: by type id.** A computation is a struct that implements the trait `Comp<R, A>`; `.boxed()` forgets its
-  shape and gives a `Dyn<R, A>`. The row is a list of types, `row![State<i64>, Choose]` =
+  `handle` only names the effect: the machine does not look at it.
+- **Rust: by type id.** A computation is a struct that implements the trait `Prog<A, R>`; `.boxed()` forgets its
+  shape and gives a `Comp<A, R>`. The row is a list of types, `eff![State<i64>, Choose]` =
   `(State<i64>, (Choose, ()))`; the empty row is `()`. `perform` needs `R: Has<E, I>`, the place `I` inferred.
   `flat_map` needs the same row on both sides. `handle` takes a computation of the row `In` with
   `In: Has<E, I, Rest = R>` and gives one of `R`. `run` asks `R: Closed`, which only `()` is. `embed` puts a
@@ -223,10 +233,13 @@ A kernel conforms when:
    constant stack; every path of a choice; state per path and state through all paths; an endless stream pulled;
    an answer that comes later; interception; delegation; reader and `local`; recover, first, fresh, clock; the
    stream functions; both, race, all, sleep; a million answers given at once; an operation with no handler; in
-   Scala and Java, one effect twice in a row, each entry with its own handler.
+   Scala and Java, one effect twice in a row, each entry with its own handler; in Scala, a program put into a
+   bigger row, its effects there in any order.
 2. **Programs that must not run do not compile**: an effect left in the row (`java/negative/`, the doctests of
    `rust/src/lib.rs`, `compileErrors` in the Scala `Properties`), an answer of the wrong type and a handler that
-   misses an operation (`java/negative/`, the doctests).
+   misses an operation (`java/negative/`, the doctests), an operation whose class is not of the effect it names
+   (`java/negative/WrongOperation.java`).
+
 3. **The TCK digest is the reference's.** A generator draws 1000 terms of depth 6 from `java.util.Random(20261010)`:
    pure, tell, get, put, among, raise, sequence, sum, and handlers of a writer, a state, a failure and a choice.
    Log, state and failure operations have an identity 0 or 1, and a handler answers only its own: in Scala the
