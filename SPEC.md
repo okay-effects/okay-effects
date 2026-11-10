@@ -18,13 +18,16 @@ writes the stack), `scala/src/Effects.scala` (the typed surface) and `scala/src/
 
 ```
 Comp A  =  Done a                       a value
-        |  Ask op                       a question; with it, what its handler is found by (§7)
+        |  Ask op                       a question; with it, what its handler is found by (§8)
         |  Bind first next              a computation, and a function of its value
         |  Handle mark s0 body          a computation under a handler, with the handler's first state
         |  Resume k x                   a continuation taken earlier, given its answer
+        |  Ensure body fin              a computation, and a finalizer for when it is left (§7)
+        |  Unwind k                     a continuation taken earlier, left: its finalizers run (§7)
 
-Mark    =  (handler, its address)       how an operation finds the handler (§7)
+Mark    =  (handler, its address)       how an operation finds the handler (§8)
 Frames  =  nil | next : Frames          what waits for a value inside one level
+        |  finally fin : Frames         a finalizer that waits (§7)
 Level   =  (frames, mark or none, state)
 Stack   =  the top level, and the levels below it
 k       =  levels, the lowest first     immutable; called "pieces" in the code
@@ -32,7 +35,9 @@ Step A  =  Done a | Asked op k
 ```
 
 `pure a = Done a`, `perform op = Ask op`, `c >>= f = Bind c f`, `defer p = Bind (Done ()) (\_ -> p)`,
-`handle h c = Handle (mark of h) s0 c`, and `k x = Resume k x`. Building any of these runs nothing.
+`handle h c = Handle (mark of h) s0 c`, `k x = Resume k x`, `ensuring c fin = Ensure c fin`, `k.unwind = Unwind k`,
+and `bracket acquire use release = acquire >>= \s -> Ensure (use s) (release s)`. Building any of these runs
+nothing: a finalizer is a computation made when it is run.
 
 Frames are never written after they are made, and neither is a level that a continuation holds. In Java no level
 is written, and a continuation shares its levels with the stack it was taken from. In Scala a level on the stack is
@@ -45,8 +50,9 @@ value — at an operation answered generally, a handler, a boxed computation, a 
 The Scala machine writes this stack typed, and nothing in it is cast. The frames of the top are an argument of the
 loop; a level holds its handler, its state, and the frames and the level outside it. A level says the row inside it
 and the value its body comes to; frames say the value they take and the one they come to; a `k` says the answer it
-waits for, and the row and the value it is resumed in. A level is a handler's, a renaming level (§7), or the bottom
-of the run: above the bottom no level is empty, so what §3 says of popping or dropping an empty level does not arise.
+waits for, and the row and the value it is resumed in. A level is a handler's, a renaming level (§8), the place of a
+handler that has left (§3, the unwinding), or the bottom of the run: above the bottom no level is empty, so what §3
+says of popping or dropping an empty level does not arise.
 
 ## 3. The machine
 
@@ -65,11 +71,14 @@ mark. `(F, m, s)` is the top level, `B` the levels below.
 | `Ask op`, general | the nearest level whose mark accepts `op` is `n` levels down | `k` = the levels from the top to that one, both included; `m'.on(op, k)`, on the levels below that one |
 | `Ask op`, unanswered | no level accepts `op` | stop: `Asked op k`, `k` = every level |
 | `Resume k x` | `T · B` | `Done x`, on `k`'s levels above `T · B`, `k`'s highest as the top |
+| `Ensure body fin` | `(F, m, s) · B` | `body`, on `(finally fin : F, m, s) · B` |
+| `Done x` | `(finally fin : F, m, s) · B` | `fin >>= \_ -> Done x`, on `(F, m, s) · B` |
+| `Unwind k` | `(F, m, s) · B` | the walk (below), on `k`'s levels above `(end : F, m, s) · B` |
 
 Details the table leaves out:
 
 - **Nearest.** The top level is asked first, then each level below. A mark *accepts* `op` when its handler is one
-  the row gives `op`. §7 says what the model requires of this, and how each kernel decides it.
+  the row gives `op`. §8 says what the model requires of this, and how each kernel decides it.
 - **A state deeper than the top.** When the handler in place is not at the top, Scala writes the new state into
   the handler's level where it is. Java rebuilds the stack down to that level with the new state in it; nothing is
   rebuilt when the state did not change. Either way a `k` taken earlier holds the state as it was when taken.
@@ -78,10 +87,31 @@ Details the table leaves out:
 - **Resume.** The current top `T` goes below `k`'s levels, unless it is empty and nothing is below it. Levels of
   `k` with neither frames nor mark are not put back, except its highest, which becomes the top.
 - **Return.** After `ret`, the level below becomes the top; when there is none, an empty level does.
+- **Unwind.** `end` is a new frame on the frames of the top: the end of this unwinding. `k`'s levels are put back
+  above it, changed in two ways. Its lowest level is the level of the handler that unwinds: the handler is taken
+  out of it, and the level is *gone*. Every level of `k` but its highest gets a frame `walk` on top of its
+  frames: what comes out of the level above — the result of a handler of `k` that answered a finalizer
+  generally — is dropped there, and the walk goes on. A level in place is put back with the state `k` holds. The
+  `k` of an `Asked` has no handler to take out.
+- **The walk.** The frames are passed with no value, the top first. A bind's frame is dropped; its function does
+  not run. At `finally fin : F` the finalizer runs: `fin`, on `walk : F`; its value comes to `walk`, is dropped,
+  and the walk goes on. A level with no frame left is popped without its `ret`, and its state is dropped. At its
+  own `end` the walk stops: `Done ()`, to the frames under `end`. The `end` of another unwinding, begun inside
+  this one, is passed like a bind's frame. A walk that comes to the bottom of the run is refused (§7).
+- **A gone level** answers nothing. An operation of another entry passes it as it passed the handler. An operation
+  of the handler's own entry goes on to the next handler outside when the handler kept its effect in the row
+  (`intercept`). When the handler took its effect out (`handle`), nobody answers: the levels the operation passed
+  are put back, and the walk goes on from the frames at the operation. So the finalizer that asked ends there,
+  and a finalizer waiting inside it still runs. A gone level is part of a `k` like any level.
+- **Elsewhere.** Java has no `Ensure`: `ensuring` is a `Bind` whose function is the finalizer's frame, and a gone
+  level is a marker (§8) that takes one from the counts of the operations that pass it; an operation with
+  nothing to take from is the handler's own. Rust's `ensuring` pushes the finalizer's frame when the program
+  starts, and its gone level is a mark of the same type that answers nothing.
 
-Every rule is a bounded amount of work, except the search for a handler, the replacing of a deeper state (Java), and the
-taking and putting back of `k`: these are linear in the number of levels they pass. No rule calls the machine:
-the stack of the host language does not grow with the program. `run c` is `step c` when it stops at `Done`.
+Every rule is a bounded amount of work, except the search for a handler, the replacing of a deeper state (Java), the
+taking and putting back of `k`, and the walk: these are linear in the number of levels they pass, the walk also in
+the frames. No rule calls the machine: the stack of the host language does not grow with the program. `run c` is
+`step c` when it stops at `Done`.
 
 ## 4. Handlers
 
@@ -89,6 +119,7 @@ A handler of the effect `F`, around a program of an `A`, comes to a `B` and may 
 
 ```
 general    ret : A -> Comp B                 on     : (op, k) -> Comp B          k : X -> Comp B, for op : Op X
+                                                                                 k.unwind : Comp ()
 in place   ret : (S, A) -> Comp B            answer : (state : S, op) -> X       and the next state
 ```
 
@@ -131,12 +162,14 @@ c >>= pure         =  c
 
 An operation is *algebraic*: `perform op >>= f` is all there is to it, and the rest of the program is its argument.
 What cannot be written so — `catch`, `local`, a scope — is not an operation. It is a handler: `Throws.recover`,
-`Reader.local`.
+`Reader.local`. A finalizer is neither: the machine runs it (§7).
 
 A general clause may do any of these with `k`:
 
 - resume it once, last (`Emit.each`) — the common case;
-- not resume it (`Throws`) — the rest of the program is dropped;
+- unwind it and not resume it (`Throws`, `Choose` with no value, `Emit.take`) — the rest of the program is
+  left: its finalizers run, and nothing else of it (§7);
+- neither resume nor unwind it — nothing of the rest runs;
 - resume it many times (`Choose`) — the same value used again; each resumption starts from the levels as taken;
 - keep it and return (`Async`, `Emit.pull`) — it is resumed later, from elsewhere, by a new `step`;
 - ask the operation again and resume with the answer (under `intercept`) — interception, audit;
@@ -159,7 +192,56 @@ comment on `state` in `scala/test/Tck.test.scala`). A kernel must be able to say
 kept in a level must be a value: in Scala and Java it is held by reference and must not be mutated; Rust asks
 `Clone` of it.
 
-## 7. The row
+## 7. Leaving: `ensuring` and `unwind`
+
+`ensuring p fin` is `p` with a finalizer: `fin`, a computation of the same row, run when `p` is left. `p` is left
+in two ways: it ends with a value, or a general handler outside it unwinds the `k` that `p` is waiting in.
+`bracket acquire use release` is `acquire`, then the use under `ensuring` of the release. The standard handlers
+that do not resume `k` unwind it first: `Throws`, `Choose` at a choice of nothing, `Emit.take` at its cut.
+
+1. **A value.** `p` ends with `x`: `fin` runs, its value is dropped, and `x` is the result.
+2. **Unwinding.** `k.unwind` runs the finalizers waiting in `k`, the innermost first, and nothing else of `k`: no
+   function of a bind, no `ret` of a handler inside `k`; the states in place inside `k` are dropped. Then it
+   gives `()`.
+3. **Where a finalizer runs.** Each runs where it was installed. The handlers of `k` between it and the handler
+   that unwinds answer its operations, a handler in place from the state `k` holds. The handlers outside the
+   one that unwinds answer it too.
+4. **The handler that unwinds has left.** It answers no operation of a finalizer. An operation of its own entry
+   goes to the next handler outside under `intercept`. Under `handle` nobody answers it: that finalizer ends
+   there, a finalizer waiting inside it still runs, and the unwinding goes on.
+5. **A finalizer that is itself left** — it fails, and the failure's handler unwinds it — is left as any
+   program is:
+   - at a value (rule 1): the value that waited is dropped, the finalizers outside run, and the handler's result
+     stands;
+   - in an unwinding, its handler outside the one that unwinds: the handler's `k` holds the rest of the
+     unwinding. The finalizers still waiting run, and this handler's result stands; the clause that began the
+     unwinding does not go on;
+   - in an unwinding, its handler inside what is unwound: the failure is answered there. The finalizers between
+     run, the handler's result is dropped, and the unwinding goes on from the handler's level.
+6. **`k` is a value.** The kernel keeps no flag of what was done with it. Unwound twice, its finalizers run
+   twice. Resumed after that, its path runs, and they run again at the path's end. Every unwinding and every
+   resumption starts from the states in place as `k` took them. The `k` of an `Asked` is unwound in the same way,
+   by whoever steps the program.
+7. **What runs nothing.** A clause that neither resumes nor unwinds `k` runs no finalizer; if `k` is resumed
+   later (`Async`), they run at the end of that path. No finalizer runs when the host language throws or panics
+   out of the run. A stream pulled lazily (`Emit.pull`, and `zip` and `merge`, which pull) and not read to its
+   end runs none.
+8. **Refused.** A handler inside the part unwound takes a `k` from a finalizer that runs in an unwinding, keeps
+   it, and resumes it on another stack. The finalizer ends there, and there is no unwinding to go on with and no
+   value: Scala and Java throw `NoUnwinding`, Rust panics.
+
+The tests named "ensuring, …" and "bracket: …" in each `Properties` are these rules; the three kernels agree on
+every outcome but these:
+
+- **Rust, rule 4.** A handler is found by the effect's type, the nearest first (§8). A handler that left under
+  `handle` still stands for its type: an operation of that type asked by a finalizer ends the finalizer there,
+  also when it is meant for a handler of the same type further out. Scala and Java send that one to its own
+  entry, where it is answered.
+- **Java, rule 4.** `intercept` goes by the class and is no row level: after `k.unwind()` nothing stands where
+  the interceptor was, and its operations go outside. An interceptor at a place, `handle(.., under(p))`, is a row
+  level: it leaves with `K.unwindKeeping(k, op)`, and after `k.unwind()` it would be gone as under `handle`.
+
+## 8. The row
 
 A handler takes its effect out of the row, and only the empty row runs:
 
@@ -173,7 +255,7 @@ three languages a program with an effect left does not compile.
 **What the model requires.** An operation asked at one entry of the row is answered by the handler that took that
 entry out: the nearest handler of that entry around it. An interceptor of the entry that stands between them is
 given the operation first. Handlers of other entries are passed, whatever their effects — also another entry of the
-same effect. With no handler left, `step` stops (§8). The three kernels decide "of that entry" in three ways.
+same effect. With no handler left, `step` stops (§9). The three kernels decide "of that entry" in three ways.
 
 - **Scala 3: by place.** `Comp[R[_], +A]`, written `A ! R`. A row is a type constructor: an effect (`Choose`,
   `State % Int`), `Pure`, or `R + E` — the effects in order. An operation is first a *word*, `word(op)`: a
@@ -198,6 +280,16 @@ same effect. With no handler left, `step` stops (§8). The three kernels decide 
   or one value is made anew at its place; any other program is a node `Embedded`, run under a *renaming level*: a
   level with no handler, past which an operation has its place in `S`. It is popped with its value and is part of
   a `k` like any level.
+  Embeddings compose. A `Sub[R, S]` and a `Sub[S, T]` make a `Sub[R, T]`, and one that leaves every place where
+  it was is `Sub.Same`: a proof, by a match, that the two rows are one. An `Embedded` entered in tail position —
+  no frame waits for its value — on a renaming level takes no level of its own: that level renames for both, by
+  the composition, and when the composition is `Same` the program runs with no renaming level. So calls in tail
+  position between rows of the same effects in different orders, however many, keep one level. Nothing is
+  composed across a handler's level. A renaming level put back by a `k` on another one is merged with it in the
+  same way; the `k` of an `Asked` is under a level that renames nothing, so a program stepped and resumed in a
+  loop keeps one such level, with a frame for every turn where something waits for its value. One composition is
+  not looked into: a renaming by `Sub.exchanged` (as `Emit.map` makes) with another after it is kept as the two,
+  and is never found to be `Same`.
   This is the requirement, exactly, for the effects of a row. A row and an effect are of one kind, `F[_]`, so a row
   can be written where an effect is meant: handled as if it were one effect, or embedded so by a place named by
   hand. The types do not refuse it. No operation is of such a place, and the machine throws `NoHandler` when one
@@ -232,7 +324,7 @@ An operation with no handler stops the run with the operation and `k`. Scala add
 of the whole run, by which its effect is known (`Asked.of`). Its `run` takes only the empty row, and throws
 `NoHandler` if the step stops at an operation all the same.
 
-## 8. The step, and the wire
+## 9. The step, and the wire
 
 `step` stops at a value, or at an operation that no handler inside the computation accepts, with the rest as `k`.
 That is the protocol between a program and whoever runs it: "here is my value", or "here is what I ask; resume me
@@ -243,9 +335,11 @@ far side keeps each `k` under a number; only the operation's name and arguments 
 other. On the far side a program asks the one operation `Call(name, args)` of the effect `Foreign` and is run by
 `step`. On the host a far program is a computation asking `Foreign`, so the host's ordinary handlers answer it —
 once, many times, or never. The whole protocol — calls, held objects, value escapes, streams under credit,
-frames, mux, auth — is specified in [wire/README.md](wire/README.md).
+frames, mux, auth — is specified in [wire/README.md](wire/README.md). On the host, `Remote.run` is a scope: when
+the run is left — with its value, or because the host throws (panics, in Rust) — every stream still open is
+cancelled and every run begun is forgotten.
 
-## 9. Conformance
+## 10. Conformance
 
 A kernel conforms when:
 
@@ -253,10 +347,13 @@ A kernel conforms when:
    meaning; a million operations, a hundred thousand left-nested binds and a million mutual tail calls in
    constant stack; every path of a choice; state per path and state through all paths; an endless stream pulled;
    an answer that comes later; interception; delegation; reader and `local`; recover, first, fresh, clock; the
-   stream functions; both, race, all, sleep; a million answers given at once; an operation with no handler; in
+   stream functions; both, race, all, sleep; a million answers given at once; an operation with no handler;
+   `ensuring` and `bracket` as §7 says, a million finalizers in a loop and a hundred thousand waiting ones unwound
+   in constant stack; in
    Scala and Java, one effect twice in a row, each entry with its own handler; in Scala, a program put into a
-   bigger row, by `into` and where it is bound, its effects there in any order, and a row handled as one effect
-   refused with `NoHandler`.
+   bigger row, by `into` and where it is bound, its effects there in any order, calls in tail position from row
+   to row and a program stepped and resumed in a loop in one level, and a row handled as one effect refused with
+   `NoHandler`.
 2. **Programs that must not run do not compile**: an effect left in the row (`java/negative/`, the doctests of
    `rust/src/lib.rs`, `compileErrors` in the Scala `Properties`), an answer of the wrong type and a handler that
    misses an operation (`java/negative/`, the doctests), an operation whose class is not of the effect it names

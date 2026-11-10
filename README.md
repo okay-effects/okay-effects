@@ -15,8 +15,9 @@ The whole of it is in [SPEC.md](SPEC.md). In short:
 ```
 operation     a question as data, naming the type of its answer        effect = a closed family of operations
 computation   Done a | Ask op | Bind c f | Handle h c | Resume k x     only data: nothing runs until `step`
+              Ensure c fin | Unwind k                                   a finalizer for when `c` is left; `k` left
 handler       of one effect; answers IN PLACE (from a state it keeps, nothing captured)
-              or GENERALLY (given `k`, the rest of the program, as a value)
+              or GENERALLY (given `k`, the rest of the program, as a value: to resume, or to unwind)
 row           the effects a computation may still ask; a handler takes its effect out of the row
 run           accepts only the empty row
 ```
@@ -25,6 +26,7 @@ The machine is one loop over a stack of *levels*, one per handler: the frames wa
 state. An operation goes to the nearest handler of its effect: of the effect's place in the row in Scala and Java,
 of the effect's type in Rust. In place, the handler answers and the loop goes on. Generally, the levels from the top
 down to the handler are taken off as `k`, an immutable value; resuming `k` puts them back, any number of times.
+Unwinding `k` puts them back to be left: the finalizers waiting in them run, and nothing else.
 
 | promise | where it comes from |
 |---|---|
@@ -35,6 +37,7 @@ down to the handler are taken off as `k`, an immutable value; resuming `k` puts 
 | each path its own state | a state in place lives in its level, and the level is part of `k` |
 | endless streams | the rest of the program after `send` is a value the consumer keeps and pulls |
 | asynchrony | a handler may keep `k` and return; whoever has the answer resumes it later |
+| what a program holds is released when it is left | `ensuring`: a finalizer is a frame; a value that passes it runs it, and a handler that does not resume `k` unwinds it |
 | interception, audit, delegation | a handler may keep its effect in the row (`intercept`); a clause may ask any operation |
 | no program with an effect left runs | the row is in the type of the computation, and `run` takes the empty row |
 
@@ -161,23 +164,27 @@ impl<S: Clone + 'static> State<S> {
 }
 ```
 
-A general handler is given `k`. This is `Choose.all` in Scala: the rest of the program resumed once for every value.
+A general handler is given `k`. This is `Choose.all` in Scala: the rest of the program resumed once for every
+value, and unwound when there is none.
 
 ```scala
 enum Choose[X]:
   case Among[X](xs: List[X]) extends Choose[X]
 
 def all[R[_], Rest[_], A](p: A ! R)(using Split[Choose, R, Rest]): List[A] ! Rest =
-  handle(p, Handler.general[Choose, Rest, A, List[A]](a => pure(List(a)))(
-    [X] => (op: Choose[X], k: X => List[A] ! Rest) => op match
+  handle(p, Handler.control[Choose, Rest, A, List[A]](a => pure(List(a)))(
+    [X] => (op: Choose[X], k: Continuation[X, Rest, List[A]]) => op match
+      case Among(Nil) => k.unwind.map(_ => Nil)
       case Among(xs) =>
         xs.foldLeft(pure[List[A], Rest](Nil))((all, x) => all.flatMap(as => k(x).map(as ++ _)))))
 ```
 
-Scala makes a handler by `Handler.general`, `tail` (in place, no state), `stateful` (in place) or `abort` (`k`
-dropped). In Java the clause is `Comp<B, R> on(F op, K<B, R> k)` and resumes with `k.resume(op, answer)`; in Rust
-it is a closure from `(E, K<B, R>)` to an `impl Prog<B, R>`, given to `Handler::new(ret, on)`, and resumes with
-`k.resume(reply, answer)`.
+Scala makes a handler by `Handler.general` (`k` as a function, to resume), `control` (`k` as a `Continuation`:
+`k(x)` resumes it, `k.unwind` leaves it), `tail` (in place, no state), `stateful` (in place) or `abort` (`k`
+unwound, then the clause's result). In Java the clause is `Comp<B, R> on(F op, K<B, R> k)`: it resumes with
+`k.resume(op, answer)` and leaves with `k.unwind()`. In Rust it is a closure from `(E, K<B, R>)` to an
+`impl Prog<B, R>`, given to `Handler::new(ret, on)`: it resumes with `k.resume(reply, answer)` and leaves with
+`k.unwind()`; `Handler::abort(ret, abort)` unwinds `k`, then goes on with `abort`.
 
 An operation is asked by a word. In Scala a word is `word(op)`, a `Word[E, X]`: the operation itself at run time,
 placed in a row where it is used; an effect's own words need no evidence (`def deposit(amount: Int) =
@@ -191,6 +198,33 @@ The standard effects, in each language: State, Reader (with `local`), Writer, Th
 caller runs. Scala has two of the family's other names as aliases (`std/Family.scala`): `Fail` for `Throws` and
 `Yield` for `Emit`, with the words `Fail.recover`, `Yield.emit`, `Yield.foreach`, `Fresh.next`.
 
+`ensuring` gives a part of a program a finalizer. It runs when that part ends with a value, and when a handler
+leaves it: `Throws`, `Choose` with no value and `Emit.take` unwind `k` before they go on without it. `bracket` is
+acquire, use, release: `ensuring` of the use. The rules are [SPEC.md](SPEC.md) §7. A failure under a finalizer,
+recovered, as each language's `Properties` has it — `said(x)` is a program that writes `x` to the test's log when
+it runs, `logged` and `told` give a result with the log, and Java's `raised()` is `Throws.raise("no")`:
+
+```scala
+val p: Int ! Throws % String = ensuring(said("body").flatMap(_ => Throws.raise("no")))(said("closed"))
+val rescued = Throws.recover((e: String) => said(s"rescued $e").map(_ => 0))(p)
+assertEquals(logged(run(rescued)), (0, List("body", "closed", "rescued no")))
+```
+
+```java
+Comp<Integer, Eff<Throws<String>, ?>> p = Properties.<Eff<Throws<String>, ?>>said("body")
+    .then(() -> raised()).ensuring(() -> said("closed"));
+Comp<Integer, Pure> rescued = Throws.recover(e -> said("rescued " + e).map(done -> 0), p);
+same(told(() -> run(rescued)), new Pair<>(0, List.of("body", "closed", "rescued no")));
+```
+
+```rust
+fn p() -> impl Prog<i64, eff![Throws<String>]> {
+    said("body").then(|| Throws::raise("no".to_string())).ensuring(|| said("closed"))
+}
+let rescued = Throws::recover(|e: String| said(format!("rescued {e}")).map(|_| 0), p());
+assert_eq!(logged(|| rescued.run()), (0, told(["body", "closed", "rescued no"])));
+```
+
 ## Compatible: with each other, and with the family
 
 - **The same answers.** Each kernel builds the family's TCK — a thousand random programs: handlers of logs, states,
@@ -201,14 +235,16 @@ caller runs. Scala has two of the family's other names as aliases (`std/Family.s
   objects, value escapes, programs continued by number (the same continuation as often as the host likes),
   streams both ways under credit, CBOR and deflate frames, mux, auth. [wire/README.md](wire/README.md) is its
   specification as implemented here. Every worker is held to six transcripts, and every host is run with every
-  worker: nine pairs, each printing [wire/expected.txt](wire/expected.txt).
+  worker: nine pairs, each printing [wire/expected.txt](wire/expected.txt). A host's `Remote.run` is a scope:
+  when the run is left — with its value, or because the host throws (panics, in Rust) — the streams still open
+  are cancelled and the runs it began are forgotten.
 
 ## What each language can and cannot say
 
 | | Scala 3 | Java 25 | Rust |
 |---|---|---|---|
 | the row | a type constructor, the effects in order: `A ! State % Int + Choose`, empty row `Pure`; a program has a declared row, or is over any `R[_]: Has[State % Int]`; the evidence (`In`, `Split`, `Sub`, made of the `Place` of each effect) is found by the compiler | a nested type with wildcards, `Comp<A, Eff<State<Integer>, Eff<Choose, ?>>>`, empty row `Pure`; positional | a type-level list, `impl Prog<A, eff![State<i64>, Choose]>`, empty row `()`; membership inferred (`Has<E, I>`) |
-| a program of a smaller row in a bigger one | automatic where it is bound (`flatMap`, `map`, a `for`) and where a bigger row is expected (an argument, a result, a branch), the effects in any order (`Sub[R, S]`); `p.into[S]` says it; a bind that embeds takes one more level | `up`, `under`, `fit`: the order of the handlers is kept | inferred for a program generic in its row; `embed`, `also` for one of a fixed row |
+| a program of a smaller row in a bigger one | automatic where it is bound (`flatMap`, `map`, a `for`) and where a bigger row is expected (an argument, a result, a branch), the effects in any order (`Sub[R, S]`); `p.into[S]` says it; a bind that embeds takes one more level; embeddings compose: one entered in tail position on another's level takes none of its own | `up`, `under`, `fit`: the order of the handlers is kept | inferred for a program generic in its row; `embed`, `also` for one of a fixed row |
 | a handler takes its effect out | from any place; what is left is the row as one would write it: `State % Int + Choose` without the state is `Choose` | from the front of the row only | from any place (`Has::Rest`) |
 | how a handler is found | by the effect's place in the row: the evidence is that place, data typed by the effect and the row (`Place`: `Only`, `Last`, `First`, `Init`); a level matches its handler's place against the operation's, and passes any other on at its place in the row outside; a program put into another row runs under a level that renames places; no class of an operation is looked at | by the operation's position in the row: it carries how many row levels it skips (`up`, `under`); its class is not tested; an interceptor by the class of the operation | by the effect's `TypeId`, type arguments included: the nearest handler of it that says `mine` |
 | one effect twice in a row | two places: the compiler finds the last, the other is named (`Place.init`) | two positions: `Eff<Reader<String>, Eff<Reader<Integer>, ?>>` | told apart by its type arguments; of one type, by an identity in the operation and `mine` |
@@ -220,6 +256,7 @@ caller runs. Scala has two of the family's other names as aliases (`std/Family.s
 | where a program's type is forgotten | nowhere: a program is `A ! R` whatever its shape | nowhere: `Comp<A, R>` | where `.boxed()` says: it gives `Comp<A, R>`, needed at recursion, at branches of different shapes, and for a program kept as a value |
 | a computation run many times | yes: immutable data | yes: immutable data | no: `run` and `step` take it by value; build it by a function |
 | a continuation resumed many times | yes | yes | yes (`K` is `Clone`; a state in place and what a closure holds are `Clone`) |
+| the rest of the program left | `k.unwind`; `Handler.abort` | `k.unwind()`; an interceptor at a place leaves with `K.unwindKeeping(k, op)` | `k.unwind()`; `Handler::abort`; a `k` dropped runs no finalizer |
 | threads | `k` may be resumed from any thread (Async's timer does) | the same | one thread: `Rc`, a thread-local pool |
 
 ## Speed
@@ -237,6 +274,10 @@ from the other two rows and under different load, and the two differed — 7.2, 
 | Java 25 | 11.0 | 13.5 | 88 | 6.4 |
 | Rust | 5.7 | 7.8 | 187 | 5.8 |
 
+Scala has a fifth lane, `embed`: the loop of `state`, its get and put a program of the state alone, bound in a
+program of a bigger declared row, so put into it at every bind. One measurement on that machine: about 14 – 16 ns
+per operation, next to 7 – 10 for `state`, where the program is generic in its row.
+
 In Rust `flat_map`, `map` and `then` return structs and allocate nothing: a chain of them, with operations answered
 in place, is straight-line code. Its `choose` is the slow lane: taking a continuation and resuming it, and the
 vectors of results, are work on the heap that static composition does not remove. Rust has no collector: its frames,
@@ -245,7 +286,7 @@ continuations and boxed values come from a thread-local pool (`rust/src/pool.rs`
 ## Layout, tests, benchmarks
 
 ```
-SPEC.md     the model: data, the machine's rules, laws, rows, conformance
+SPEC.md     the model: data, the machine's rules, laws, finalizers, rows, conformance
 scala/      scala-cli. src/Effects.scala the typed surface, Rows.scala the rows and places, Machine.scala the
             loop, Branches.scala the macro that places the branches of a bound `if`, Messages.scala the compile
             errors, src/std the effects (Family.scala the family's other names), src/wire the wire, src/bench;
@@ -259,8 +300,8 @@ test.sh     everything
 ```
 
 `./test.sh` needs scala-cli, a JDK 25 or newer and cargo, and takes about a minute. It runs the three test suites
-(Scala 68 tests; Java 25 properties, 25 wire tests and 6 programs refused by javac; Rust 68 tests, compile-fail
-doctests among them), every worker against the 6 transcripts, and the nine host–worker pairs.
+(Scala 104 tests; Java 50 properties, 26 wire tests and 6 programs refused by javac; Rust 100 tests,
+compile-fail doctests among them), every worker against the 6 transcripts, and the nine host–worker pairs.
 
 ```
 cd scala && scala-cli run . --server=false --main-class okay.effects.scala.bench.benchmark
@@ -286,7 +327,12 @@ cd rust && cargo run --release --example bench
   machine, made and dropped at that bind, which renames its operations on their way out. One measurement, by the
   author of the kernel on one machine: about 14 ns and 128 bytes a bind more than the program told its row
   (`tick[App]`). `into` is the same program only into the same row; one operation or one value is made anew at its
-  place; any other program takes the level, also when every effect keeps its place.
+  place; any other program takes the level, also when every effect keeps its place. An embedding entered in tail
+  position on the level of another takes none of its own: the two renamings are composed, and when together they
+  rename nothing the level is dropped. So calls in tail position between rows of the same effects in different
+  orders keep one level, however many, and a program stepped from outside and resumed in a loop keeps one. A
+  renaming made by `Sub.exchanged` (as `Emit.map` makes), with another composed after it, is not looked into: the
+  two are kept, and are never found to rename nothing.
 - **Scala: a row can be written where an effect is meant.** A row and an effect are of one kind, `F[_]`, so the
   types do not refuse a handler of a row as if it were one effect: with `p: Int ! App`,
   `handle(p, Handler.abort[App, Pure, Int, Int](..))` compiles and has the type `Int ! Pure`. No operation is
@@ -309,12 +355,25 @@ cd rust && cargo run --release --example bench
 - **Rust asks for `.boxed()` and `Clone`.** A function that calls itself returns `Comp<A, R>`, and branches of
   different shapes each end with `.boxed()`; without them rustc refuses the program. A closure given to
   `flat_map`, `map`, `then` or `defer` is `FnOnce + Clone`: what it holds must be `Clone`, and is copied when a
-  continuation is resumed again.
+  continuation is resumed again. `Throws::run` and `Throws::recover` ask `E: Clone`, `ensuring` asks `Clone` of
+  its program's value, `bracket` of the resource and the value, `Handler::abort` of the effect.
 - **Rust does not tie a `Reply` to its `k`.** A `Reply` kept from another operation is accepted by `k.resume`; if
   its type is not the one awaited, the program panics where the value is taken.
 - **Rust**: a computation is run once; everything is of one thread; the `unsafe` code of `val.rs`, `pool.rs` and
-  `erased.rs` has its argument in comments. Under Miri the three modules' own tests, the TCK and the properties
-  pass, the properties without their million-step loops and the endless stream, which were not run there.
+  `erased.rs` has its argument in comments. Under Miri (nightly, `-Zmiri-disable-isolation`) the three modules'
+  own tests, the TCK and the properties pass. Nine properties are skipped there (`#[cfg_attr(miri, ignore)]`):
+  the loops of a hundred thousand and a million steps, and the endless stream. Four of the nine have a twin of a
+  few thousand steps that runs there: the chain of binds and frames dropped, and — in one test — the finalizers in
+  a loop, the waiting finalizers unwound, and the finalizers never run and dropped. The other five have none: the
+  million operations, the binds nested to the left, the mutual tail calls, the endless stream, the million
+  answers given at once. The wire is not part of this: of its tests in `src/wire`, the CBOR examples fail under
+  Miri (a float decoded as `1.0000000000000002` for `1.0`).
+- **A finalizer runs only when the machine leaves its program.** Not when the host throws or panics out of the
+  run; not for a `k` that a clause neither resumes nor unwinds (in Rust: drops); not for a stream pulled
+  (`Emit.pull`, `zip`, `merge`) and not read to its end — `take` under the `pull` cuts it first. A `k` unwound twice
+  runs its finalizers twice. The kernels differ at one rule ([SPEC.md](SPEC.md) §7): in Rust a handler that left
+  still stops the operations of its type that a finalizer asks; Java's interceptor at a place leaves with
+  `K.unwindKeeping`.
 - **The wire** leaves out tables and data frames, direct-style far sides (`once`) and `continue` with a
   condition, `bytes`, `zlib`, `verify` and `describe`, TCP, TLS and in-process links (the list is at the end of
   [wire/README.md](wire/README.md)). The transport is a child process's standard input and output. What is
