@@ -255,8 +255,6 @@ cd rust && cargo run --release --example bench
   (`IllegalArgumentException`).
 - **Rust does not tie a `Reply` to its `k`.** A `Reply` kept from another operation is accepted by `k.resume`; if
   its type is not the one awaited, the program panics where the value is taken.
-- **Scala does not refuse a handler that misses a case**: it warns. The suite has no Scala test of programs that
-  must not compile.
 - **Rust**: a computation is run once; everything is of one thread; the `unsafe` code of `val.rs` and `pool.rs`
   has its argument in comments and has not been checked under Miri.
 - **The wire** leaves out tables and data frames, direct-style far sides (`once`) and `continue` with a
