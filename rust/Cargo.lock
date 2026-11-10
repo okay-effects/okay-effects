@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "okay-algebraic"
+name = "okay-effects"
 version = "0.1.0"

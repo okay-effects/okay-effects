@@ -9,24 +9,23 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::rc::Rc;
 
 use crate::json::Json;
-use crate::{Asked, Comp, Op, Step, defer, perform, pure};
+use crate::{Asked, Comp, Has, Reply, Step, defer, perform, pure, row};
 
-pub struct Call {
-    pub name: String,
-    pub args: Vec<Json>,
+pub enum Wire {
+    /// a name and arguments
+    Call(String, Vec<Json>, Reply<Json>),
 }
 
-impl Op for Call {
-    type Answer = Json;
+pub fn call<R: Has<Wire, I>, I>(name: &str, args: Vec<Json>) -> Comp<R, Json> {
+    perform(|r| Wire::Call(name.to_string(), args, r))
 }
 
-pub fn call(name: &str, args: Vec<Json>) -> Comp<Json> {
-    perform(Call { name: name.to_string(), args })
-}
+/// A program that crosses: all it asks is calls.
+pub type Program = Comp<row![Wire], Json>;
 
 pub const SHIM: i64 = 9;
 
-pub type Programs = HashMap<&'static str, Box<dyn Fn(&[Json]) -> Comp<Json>>>;
+pub type Programs = HashMap<&'static str, Box<dyn Fn(&[Json]) -> Program>>;
 
 fn condition(kind: &str, message: String) -> Json {
     Json::obj([("condition", Json::obj([("kind", Json::str(kind)), ("message", Json::Str(message))]))])
@@ -34,24 +33,18 @@ fn condition(kind: &str, message: String) -> Json {
 
 /// THE FAR SIDE: programs by name, run a step at a time for a host; their continuations kept until forgotten.
 pub fn serve(programs: &Programs, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
-    let mut kept: HashMap<(i64, i64), Asked<Json>> = HashMap::new();
+    let mut kept: HashMap<(i64, i64), Asked<row![Wire], Json>> = HashMap::new();
     let mut counter = 0;
 
-    let mut node = |kept: &mut HashMap<(i64, i64), Asked<Json>>, run: i64, p: Comp<Json>| match p.step() {
+    let mut node = |kept: &mut HashMap<(i64, i64), Asked<row![Wire], Json>>, run: i64, p: Program| match p.step() {
         Step::Done(value) => Json::obj([("ok", Json::obj([("done", value)]))]),
-        Step::Asked(asked) => match asked.op::<Call>() {
-            Some(call) => {
-                counter += 1;
-                let perform = [
-                    ("perform", Json::str(&call.name)),
-                    ("args", Json::Arr(call.args.clone())),
-                    ("k", Json::Int(counter)),
-                ];
-                kept.insert((run, counter), asked);
-                Json::obj([("ok", Json::obj(perform))])
-            }
-            None => condition("NoHandler", format!("an operation with no handler: {}", asked.name())),
-        },
+        Step::Asked(asked) => {
+            let Wire::Call(name, args, _) = asked.op().expect("the row has no other effect");
+            counter += 1;
+            let perform = [("perform", Json::str(name)), ("args", Json::Arr(args.clone())), ("k", Json::Int(counter))];
+            kept.insert((run, counter), asked);
+            Json::obj([("ok", Json::obj(perform))])
+        }
     };
 
     let hello = Json::obj([
@@ -77,7 +70,11 @@ pub fn serve(programs: &Programs, input: impl BufRead, mut output: impl Write) -
                         }
                     }
                     (Json::Str(op), Json::Int(run), _, Json::Int(k)) if op == "continue" => {
-                        match kept.get(&(*run, *k)).map(|asked| asked.resume::<Call>(m.get("answer").clone())) {
+                        let resumed = kept.get(&(*run, *k)).map(|asked| {
+                            let Wire::Call(_, _, r) = asked.op().expect("the row has no other effect");
+                            asked.resume(*r, m.get("answer").clone())
+                        });
+                        match resumed {
                             Some(resumed) => node(&mut kept, *run, resumed),
                             None => condition("LookupError", format!("no continuation {k} of run {run}")),
                         }
@@ -135,7 +132,7 @@ impl Drop for Far {
 }
 
 /// THE HOST'S VIEW of a far side: a process speaking the wire on its standard input and output. A program of it is
-/// a program here — what it asks is asked here as a `Call`, and answered by this side's handlers.
+/// a program here — what it asks is asked here as a call, and answered by this side's handlers.
 #[derive(Clone)]
 pub struct Remote(Rc<RefCell<Far>>);
 
@@ -152,7 +149,7 @@ impl Remote {
     }
 
     /// The far side's program `name`, as a program of this side.
-    pub fn program(&self, name: &str, args: Vec<Json>) -> Comp<Json> {
+    pub fn program<R: Has<Wire, I>, I: 'static>(&self, name: &str, args: Vec<Json>) -> Comp<R, Json> {
         let (far, name) = (self.clone(), name.to_string());
         defer(move || {
             let run = {
@@ -166,7 +163,7 @@ impl Remote {
         })
     }
 
-    fn node(&self, run: Json, ok: Json) -> Comp<Json> {
+    fn node<R: Has<Wire, I>, I: 'static>(&self, run: Json, ok: Json) -> Comp<R, Json> {
         let (Json::Str(name), Json::Arr(args)) = (ok.get("perform"), ok.get("args")) else {
             return pure(ok.get("done").clone());
         };

@@ -1,168 +1,230 @@
-//! The standard effects: each a few operations (data) and a handler or two (functions on programs).
+//! The standard effects: each an enum of operations (data) and a handler or two (functions on programs).
 
-use std::marker::PhantomData;
 use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{Comp, Handler, NoHandler, Op, Step, perform, pure};
+use crate::{Comp, Handler, Has, K, Never, Reply, perform, pure};
 
-// -- STATE
+mod emit;
+mod later;
 
-pub struct Get<S>(PhantomData<S>);
-pub struct Put<S>(pub S);
+pub use emit::{Emit, Pull};
+pub use later::{Async, Resume, Timers};
 
-impl<S: Clone + 'static> Op for Get<S> {
-    type Answer = S;
-}
-impl<S: Clone + 'static> Op for Put<S> {
-    type Answer = ();
-}
-
-pub fn get<S: Clone + 'static>() -> Comp<S> {
-    perform(Get(PhantomData))
+/// STATE.
+pub enum State<S> {
+    Get(Reply<S>),
+    Put(S, Reply<()>),
 }
 
-pub fn put<S: Clone + 'static>(s: S) -> Comp<()> {
-    perform(Put(s))
-}
+impl<S: Clone + 'static> State<S> {
+    pub fn get<R: Has<Self, I>, I>() -> Comp<R, S> {
+        perform(State::Get)
+    }
 
-/// The state passed along: a program's answer is a function of the state it is resumed in.
-pub fn state<S: Clone + 'static, A: Clone + 'static>(s0: S, p: Comp<A>) -> Comp<(S, A)> {
-    type In<S, A> = Rc<dyn Fn(S) -> Comp<(S, A)>>;
-    let h: Handler<A, In<S, A>> = Handler::new(|a: A| pure(Rc::new(move |s: S| pure((s, a.clone()))) as In<S, A>))
-        .on(|_: &Get<S>, k| {
-            pure(Rc::new(move |s: S| k.resume(s.clone()).flat_map(move |f| f(s.clone()))) as In<S, A>)
-        })
-        .on(|put: &Put<S>, k| {
-            let s = put.0.clone();
-            pure(Rc::new(move |_: S| {
-                let s = s.clone();
-                k.resume(()).flat_map(move |f| f(s.clone()))
-            }) as In<S, A>)
-        });
-    h.handle(p).flat_map(move |f| f(s0.clone()))
-}
+    pub fn put<R: Has<Self, I>, I>(s: S) -> Comp<R, ()> {
+        perform(|r| State::Put(s, r))
+    }
 
-// -- WRITER: values told, collected in order
+    pub fn modify<R: Has<Self, I>, I>(f: impl Fn(S) -> S + 'static) -> Comp<R, ()> {
+        Self::get().flat_map(move |s| Self::put(f(s)))
+    }
 
-pub struct Tell<W>(pub W);
-
-impl<W: Clone + 'static> Op for Tell<W> {
-    type Answer = ();
-}
-
-pub fn tell<W: Clone + 'static>(w: W) -> Comp<()> {
-    perform(Tell(w))
-}
-
-pub fn writer<W: Clone + 'static, A: Clone + 'static>(p: Comp<A>) -> Comp<(Vec<W>, A)> {
-    Handler::new(|a: A| pure((Vec::<W>::new(), a)))
-        .on(|tell: &Tell<W>, k| {
-            let w = tell.0.clone();
-            k.resume(()).map(move |(mut log, a): (Vec<W>, A)| {
-                log.insert(0, w.clone());
-                (log, a)
-            })
-        })
-        .handle(p)
-}
-
-// -- THROWS: the rest of the program is dropped
-
-pub struct Raise<E>(pub E);
-
-/// What answers a raise: nothing.
-#[derive(Clone)]
-pub enum Never {}
-
-impl<E: Clone + 'static> Op for Raise<E> {
-    type Answer = Never;
-}
-
-pub fn raise<E: Clone + 'static, A: Clone + 'static>(error: E) -> Comp<A> {
-    perform(Raise(error)).map(|never| match never {})
-}
-
-pub fn throws<E: Clone + 'static, A: Clone + 'static>(p: Comp<A>) -> Comp<Result<A, E>> {
-    Handler::new(|a: A| pure(Ok(a))).on(|raise: &Raise<E>, _| pure(Err(raise.0.clone()))).handle(p)
-}
-
-// -- CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times
-
-pub struct Among<X>(pub Vec<X>);
-
-impl<X: Clone + 'static> Op for Among<X> {
-    type Answer = X;
-}
-
-pub fn among<X: Clone + 'static>(values: Vec<X>) -> Comp<X> {
-    perform(Among(values))
-}
-
-/// Every value the program comes to.
-pub fn all<X: Clone + 'static, A: Clone + 'static>(p: Comp<A>) -> Comp<Vec<A>> {
-    Handler::new(|a: A| pure(vec![a]))
-        .on(|among: &Among<X>, k| {
-            among.0.iter().fold(pure(Vec::new()), |found, x| {
-                let (k, x) = (k.clone(), x.clone());
-                found.flat_map(move |found: Vec<A>| {
-                    k.resume(x.clone()).map(move |more| [found.clone(), more].concat())
-                })
-            })
-        })
-        .handle(p)
-}
-
-// -- EMIT: a stream, possibly endless — who handles it takes one value and keeps the rest for later
-
-pub struct Send<T>(pub T);
-
-impl<T: Clone + 'static> Op for Send<T> {
-    type Answer = ();
-}
-
-pub fn send<T: Clone + 'static>(value: T) -> Comp<()> {
-    perform(Send(value))
-}
-
-/// The values sent, pulled as they are needed: a pull is a step of the machine.
-pub fn stream<T: Clone + 'static, A: Clone + 'static>(p: Comp<A>) -> impl Iterator<Item = Result<T, NoHandler>> {
-    let mut rest = Some(p);
-    std::iter::from_fn(move || match rest.take()?.step() {
-        Step::Done(_) => None,
-        Step::Asked(asked) => match asked.op::<Send<T>>() {
-            Some(send) => {
-                let value = send.0.clone();
-                rest = Some(asked.resume::<Send<T>>(()));
-                Some(Ok(value))
+    /// The state kept by the handler, answered in place; each path of the program has its own.
+    pub fn run<R: Has<Self, I>, I, A: 'static>(s0: S, p: Comp<R, A>) -> Comp<R::Rest, (S, A)> {
+        let answer = |state: &mut S, op| match op {
+            State::Get(r) => r.give(state.clone()),
+            State::Put(s, r) => {
+                *state = s;
+                r.give(())
             }
-            None => Some(Err(NoHandler { op: asked.name() })),
-        },
-    })
+        };
+        Handler::in_place(s0, |s, a| pure((s, a)), answer).handle(p)
+    }
 }
 
-// -- ASYNC: the answer comes later — the handler keeps the rest and returns; who has the answer resumes it
-
-pub type Resume<X> = Rc<dyn Fn(X)>;
-
-pub struct Await<X>(pub Rc<dyn Fn(Resume<X>)>);
-
-impl<X: Clone + 'static> Op for Await<X> {
-    type Answer = X;
+/// READER: a value of the surroundings.
+pub enum Reader<V> {
+    Ask(Reply<V>),
 }
 
-pub fn wait<X: Clone + 'static>(register: impl Fn(Resume<X>) + 'static) -> Comp<X> {
-    perform(Await(Rc::new(register)))
+impl<V: Clone + 'static> Reader<V> {
+    pub fn ask<R: Has<Self, I>, I>() -> Comp<R, V> {
+        perform(Reader::Ask)
+    }
+
+    pub fn run<R: Has<Self, I>, I, A: 'static>(value: V, p: Comp<R, A>) -> Comp<R::Rest, A> {
+        let answer = move |_: &mut (), op| match op {
+            Reader::Ask(r) => r.give(value.clone()),
+        };
+        Handler::in_place((), |_, a| pure(a), answer).handle(p)
+    }
+
+    /// The program, its asks answered by the reader outside, through `f`: an interceptor.
+    pub fn local<R: Has<Self, I>, I, A: 'static>(f: impl Fn(V) -> V + 'static, p: Comp<R, A>) -> Comp<R, A> {
+        let f = Rc::new(f);
+        let on = move |op, k: K<R, A>| match op {
+            Reader::Ask(r) => {
+                let f = f.clone();
+                Self::ask().flat_map(move |v| k.resume(r, f(v)))
+            }
+        };
+        Handler::new(pure, on).intercept(p)
+    }
 }
 
-/// The program started; `done` is called with its value, now or later. Its awaits are of `X`s.
-pub fn start<X: Clone + 'static, A: Clone + 'static>(p: Comp<A>, done: impl Fn(A) + 'static) {
-    let h = Handler::new(move |a: A| {
-        done(a);
-        pure(())
-    })
-    .on(|wait: &Await<X>, k| {
-        (wait.0)(Rc::new(move |x| k.resume(x).run().expect("an operation with no handler, after an await")));
-        pure(())
-    });
-    h.handle(p).run().expect("an operation with no handler");
+/// WRITER: values told, collected in order.
+pub enum Writer<W> {
+    Tell(W, Reply<()>),
+}
+
+impl<W: Clone + 'static> Writer<W> {
+    pub fn tell<R: Has<Self, I>, I>(w: W) -> Comp<R, ()> {
+        perform(|r| Writer::Tell(w, r))
+    }
+
+    pub fn run<R: Has<Self, I>, I, A: 'static>(p: Comp<R, A>) -> Comp<R::Rest, (Vec<W>, A)> {
+        let answer = |told: &mut Vec<W>, op| match op {
+            Writer::Tell(w, r) => {
+                told.push(w);
+                r.give(())
+            }
+        };
+        Handler::in_place(Vec::new(), |told, a| pure((told, a)), answer).handle(p)
+    }
+}
+
+/// THROWS: the rest of the program is dropped.
+pub enum Throws<E> {
+    Raise(E, Reply<Never>),
+}
+
+impl<E: 'static> Throws<E> {
+    pub fn raise<R: Has<Self, I>, I, A: 'static>(error: E) -> Comp<R, A> {
+        perform(|r| Throws::Raise(error, r)).map(|never: Never| match never {})
+    }
+
+    pub fn run<R: Has<Self, I>, I, A: 'static>(p: Comp<R, A>) -> Comp<R::Rest, Result<A, E>> {
+        let on = |op, _| match op {
+            Throws::Raise(error, _) => pure(Err(error)),
+        };
+        Handler::new(|a| pure(Ok(a)), on).handle(p)
+    }
+
+    /// The program, or what `rescue` makes of its failure.
+    pub fn recover<R: Has<Self, I>, I, A: 'static>(
+        rescue: impl Fn(E) -> Comp<R::Rest, A> + 'static,
+        p: Comp<R, A>,
+    ) -> Comp<R::Rest, A> {
+        let on = move |op, _| match op {
+            Throws::Raise(error, _) => rescue(error),
+        };
+        Handler::new(pure, on).handle(p)
+    }
+}
+
+/// CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times.
+pub enum Choose {
+    /// one of so many: which
+    Among(usize, Reply<usize>),
+}
+
+impl Choose {
+    pub fn among<R: Has<Self, I>, I, X: Clone + 'static>(xs: Vec<X>) -> Comp<R, X> {
+        perform(|r| Choose::Among(xs.len(), r)).map(move |i: usize| xs[i].clone())
+    }
+
+    /// No value: this path ends.
+    pub fn none<R: Has<Self, I>, I, X: 'static>() -> Comp<R, X> {
+        perform(|r| Choose::Among(0, r)).map(|_: usize| unreachable!("one of none"))
+    }
+
+    /// Every value the program comes to.
+    pub fn all<R: Has<Self, I>, I, A: Clone + 'static>(p: Comp<R, A>) -> Comp<R::Rest, Vec<A>> {
+        // the values of the paths from the `i`-th of `n` on, after those `found` before
+        fn from<T: 'static, A: Clone + 'static>(
+            k: K<T, Vec<A>>,
+            r: Reply<usize>,
+            (i, n): (usize, usize),
+            found: Vec<A>,
+        ) -> Comp<T, Vec<A>> {
+            if i == n {
+                return pure(found);
+            }
+            k.resume(r, i).flat_map(move |more| {
+                let found = found.iter().cloned().chain(more).collect();
+                from(k.clone(), r, (i + 1, n), found)
+            })
+        }
+        let on = |op, k| match op {
+            Choose::Among(n, r) => from(k, r, (0, n), Vec::new()),
+        };
+        Handler::new(|a| pure(vec![a]), on).handle(p)
+    }
+
+    /// The first value the program comes to, the other paths not taken.
+    pub fn first<R: Has<Self, I>, I, A: 'static>(p: Comp<R, A>) -> Comp<R::Rest, Option<A>> {
+        // the first value of the paths from the `i`-th of `n` on
+        fn from<T: 'static, A: 'static>(
+            k: K<T, Option<A>>,
+            r: Reply<usize>,
+            (i, n): (usize, usize),
+        ) -> Comp<T, Option<A>> {
+            if i == n {
+                return pure(None);
+            }
+            k.resume(r, i).flat_map(move |found| match found {
+                Some(a) => pure(Some(a)),
+                None => from(k.clone(), r, (i + 1, n)),
+            })
+        }
+        let on = |op, k| match op {
+            Choose::Among(n, r) => from(k, r, (0, n)),
+        };
+        Handler::new(|a| pure(Some(a)), on).handle(p)
+    }
+}
+
+/// FRESH: a number never given before, in this run.
+pub enum Fresh {
+    Next(Reply<i64>),
+}
+
+impl Fresh {
+    pub fn fresh<R: Has<Self, I>, I>() -> Comp<R, i64> {
+        perform(Fresh::Next)
+    }
+
+    pub fn run<R: Has<Self, I>, I, A: 'static>(p: Comp<R, A>) -> Comp<R::Rest, A> {
+        let answer = |next: &mut i64, op| match op {
+            Fresh::Next(r) => {
+                *next += 1;
+                r.give(*next - 1)
+            }
+        };
+        Handler::in_place(0, |_, a| pure(a), answer).handle(p)
+    }
+}
+
+/// CLOCK: the time, in milliseconds — the system's, or one a test sets.
+pub enum Clock {
+    Now(Reply<i64>),
+}
+
+impl Clock {
+    pub fn now<R: Has<Self, I>, I>() -> Comp<R, i64> {
+        perform(Clock::Now)
+    }
+
+    pub fn system<R: Has<Self, I>, I, A: 'static>(p: Comp<R, A>) -> Comp<R::Rest, A> {
+        let millis = || SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as i64);
+        Self::at(millis, p)
+    }
+
+    pub fn at<R: Has<Self, I>, I, A: 'static>(time: impl Fn() -> i64 + 'static, p: Comp<R, A>) -> Comp<R::Rest, A> {
+        let answer = move |_: &mut (), op| match op {
+            Clock::Now(r) => r.give(time()),
+        };
+        Handler::in_place((), |_, a| pure(a), answer).handle(p)
+    }
 }

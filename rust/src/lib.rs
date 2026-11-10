@@ -1,326 +1,365 @@
-//! Algebraic effects and handlers: a computation is data, a handler is a fold over it, one small machine runs it.
-//! The same model as the Scala and the Java kernels beside this one; the same programs come to the same answers.
+//! Algebraic effects and handlers: a computation is data, a handler answers its operations, one small machine runs
+//! it. The same model as the Scala and the Java kernels beside this one; the same programs come to the same answers.
 //!
-//! Rust has no type for "an operation answered by an X" as one sealed family, so an operation is a type of its own
-//! (`impl Op for Get { type Answer = i64; }`) and a handler is a list of typed clauses, one per operation. Values
-//! travel through the machine as `Rc<dyn Any>`: a continuation is a value that may be resumed many times, so what
-//! it holds is shared, and what a program answers is `Clone`.
+//! An effect is one enum; each operation is a variant that carries a `Reply<X>`, the witness of what answers it.
+//! A handler is one closure with a `match` over the enum. A computation `Comp<R, A>` carries the ROW `R` of the
+//! effects it may ask, a list of types: a handler takes its effect out of the row, and only a program with the
+//! empty row has `run`. So rustc refuses an effect left without a handler, a handler that misses an operation,
+//! and an answer of the wrong type.
+//!
+//! ```
+//! use okay_effects::effects::Choose;
+//! use okay_effects::{Comp, Handler, Has, Reply, perform, pure, row};
+//!
+//! // an effect: its operations, each with what answers it
+//! enum Account {
+//!     Deposit(i64, Reply<()>),
+//!     Balance(Reply<i64>),
+//! }
+//!
+//! fn deposit<R: Has<Account, I>, I>(amount: i64) -> Comp<R, ()> {
+//!     perform(|r| Account::Deposit(amount, r))
+//! }
+//!
+//! fn balance<R: Has<Account, I>, I>() -> Comp<R, i64> {
+//!     perform(Account::Balance)
+//! }
+//!
+//! // a program of two effects
+//! fn program() -> Comp<row![Account, Choose], i64> {
+//!     Choose::among(vec![1, 2]).flat_map(|x| deposit(x * 10)).then(|| balance())
+//! }
+//!
+//! // a handler: every operation answered in place, from a balance it keeps
+//! fn bank<A: 'static>(start: i64, p: Comp<row![Account, Choose], A>) -> Comp<row![Choose], A> {
+//!     let answer = |balance: &mut i64, op| match op {
+//!         Account::Deposit(amount, r) => {
+//!             *balance += amount;
+//!             r.give(())
+//!         }
+//!         Account::Balance(r) => r.give(*balance),
+//!     };
+//!     Handler::in_place(start, |_, a| pure(a), answer).handle(p)
+//! }
+//!
+//! // each handler takes its effect out of the row; with none left, the program runs
+//! assert_eq!(Choose::all(bank(100, program())).run(), vec![110, 120]);
+//! ```
+//!
+//! An effect left in the row: there is no `run`.
+//!
+//! ```compile_fail,E0599
+//! use okay_effects::effects::{Choose, State};
+//! use okay_effects::{Comp, row};
+//!
+//! let p: Comp<row![State<i64>, Choose], i64> = State::get();
+//! State::run(0, p).run(); // `Choose` is not handled
+//! ```
+//!
+//! An operation of an effect that is not in the program's row: it cannot be asked.
+//!
+//! ```compile_fail,E0277
+//! use okay_effects::effects::{Choose, State};
+//! use okay_effects::{Comp, row};
+//!
+//! let p: Comp<row![Choose], i64> = State::get();
+//! ```
+//!
+//! A handler that misses an operation: the `match` is not exhaustive.
+//!
+//! ```compile_fail,E0004
+//! # use okay_effects::{Comp, Handler, Reply, pure, row};
+//! # enum Account {
+//! #     Deposit(i64, Reply<()>),
+//! #     Balance(Reply<i64>),
+//! # }
+//! fn bank(p: Comp<row![Account], i64>) -> Comp<row![], i64> {
+//!     let answer = |balance: &mut i64, op| match op {
+//!         Account::Balance(r) => r.give(*balance),
+//!     };
+//!     Handler::in_place(0, |_, a| pure(a), answer).handle(p)
+//! }
+//! ```
+//!
+//! An answer of the wrong type: a `Reply<i64>` gives only an `i64`.
+//!
+//! ```compile_fail,E0308
+//! # use okay_effects::{Comp, Handler, Reply, pure, row};
+//! # enum Account {
+//! #     Deposit(i64, Reply<()>),
+//! #     Balance(Reply<i64>),
+//! # }
+//! fn bank(p: Comp<row![Account], i64>) -> Comp<row![], i64> {
+//!     let answer = |balance: &mut i64, op| match op {
+//!         Account::Deposit(amount, r) => {
+//!             *balance += amount;
+//!             r.give(())
+//!         }
+//!         Account::Balance(r) => r.give("nothing"),
+//!     };
+//!     Handler::in_place(0, |_, a| pure(a), answer).handle(p)
+//! }
+//! ```
 
-use std::any::{Any, TypeId, type_name};
-use std::fmt;
+use std::any::TypeId;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
 pub mod effects;
 pub mod json;
+mod machine;
+mod val;
 pub mod wire;
 
-/// An operation: a question as data, answered by an `Answer`.
-pub trait Op: 'static {
-    type Answer: Clone + 'static;
+use machine::{Clause, Mark, Node, Pieces, State, bind};
+use val::Val;
+
+// -- THE ROW: the effects a computation may ask, as a list of types — `()`, or an effect and the rest: `(E, R)`.
+// It is a proof for rustc and nothing more: when a program runs, an operation finds its handler by its type.
+
+/// The place of an effect in a row: the first.
+pub struct Here;
+/// The place of an effect in a row: after the first, at `I` of the rest.
+pub struct There<I>(PhantomData<I>);
+
+/// The effect `E` is in this row; `Rest` is the row without it. The place `I` is found by rustc, never written.
+#[diagnostic::on_unimplemented(message = "the effect `{E}` is not in the row `{Self}`")]
+pub trait Has<E, I>: 'static {
+    type Rest: 'static;
 }
 
-type Val = Rc<dyn Any>;
-type Next = Rc<dyn Fn(Val) -> Node>;
-
-/// An operation asked: itself, and the name of its type.
-#[derive(Clone)]
-struct Asking {
-    op: Rc<dyn Any>,
-    name: &'static str,
+impl<E: 'static, T: 'static> Has<E, Here> for (E, T) {
+    type Rest = T;
 }
 
-/// A computation. Only data: nothing runs until `step`.
-#[derive(Clone)]
-enum Node {
-    /// a value
-    Done(Val),
-    /// a question: an operation, to be answered
-    Ask(Asking),
-    /// a computation, and what follows its value
-    Bind(Rc<Node>, Next),
-    /// a computation, and a continuation taken earlier put back after it
-    Plug(Rc<Node>, Rest),
+impl<E, F: 'static, T: Has<E, I>, I> Has<E, There<I>> for (F, T) {
+    type Rest = (F, T::Rest);
 }
 
-/// A continuation as data: what waits for a value. Shared, so it may be resumed never, once or many times.
-type Rest = Rc<Frames>;
+/// Every effect of the row `S` is in this row. The places `Is` are found by rustc.
+#[diagnostic::on_unimplemented(message = "the row `{Self}` does not hold every effect of the row `{S}`")]
+pub trait Includes<S, Is> {}
 
-enum Frames {
-    End,
-    Then(Next, Rest),
-    Both(Rest, Rest),
+impl<R> Includes<(), ()> for R {}
+
+impl<R: Has<E, I> + Includes<T, Is>, E, T, I, Is> Includes<(E, T), (I, Is)> for R {}
+
+/// A row, written as a list: `row![State<i64>, Choose]` is `(State<i64>, (Choose, ()))`.
+#[macro_export]
+macro_rules! row {
+    () => { () };
+    ($effect:ty $(, $rest:ty)* $(,)?) => { ($effect, $crate::row![$($rest),*]) };
 }
 
-thread_local! {
-    static END: Rest = Rc::new(Frames::End);
-    static UNIT: Rc<Node> = Rc::new(Node::Done(Rc::new(())));
-}
+// -- A COMPUTATION
 
-fn end() -> Rest {
-    END.try_with(Rc::clone).unwrap_or_else(|_| Rc::new(Frames::End))
-}
-
-fn unit() -> Rc<Node> {
-    UNIT.try_with(Rc::clone).unwrap_or_else(|_| Rc::new(Node::Done(Rc::new(()))))
-}
-
-/// THE MACHINE: a computation run to its next question, in a loop — constant stack, whatever the program.
-fn machine(start: Node) -> (Result<Val, Asking>, Rest) {
-    let mut c = start;
-    let mut k = end();
-    loop {
-        c = match &c {
-            Node::Ask(asking) => return (Err(asking.clone()), k),
-            Node::Bind(first, next) => {
-                k = Rc::new(Frames::Then(next.clone(), k));
-                (**first).clone()
-            }
-            Node::Plug(first, rest) => {
-                k = if matches!(*k, Frames::End) { rest.clone() } else { Rc::new(Frames::Both(rest.clone(), k)) };
-                (**first).clone()
-            }
-            Node::Done(x) => match &*k.clone() {
-                Frames::End => return (Ok(x.clone()), k),
-                Frames::Then(next, rest) => {
-                    k = rest.clone();
-                    next(x.clone())
-                }
-                Frames::Both(first, rest) => match &**first {
-                    Frames::End => {
-                        k = rest.clone();
-                        continue;
-                    }
-                    Frames::Then(next, more) => {
-                        k = Rc::new(Frames::Both(more.clone(), rest.clone()));
-                        next(x.clone())
-                    }
-                    Frames::Both(a, b) => {
-                        k = Rc::new(Frames::Both(a.clone(), Rc::new(Frames::Both(b.clone(), rest.clone()))));
-                        continue;
-                    }
-                },
-            },
-        }
-    }
-}
-
-// Rust has no collector: a chain of a million binds, or of a million frames, would be dropped by recursion a
-// million deep. So a chain is dropped in a loop — each link is emptied before it is let go.
-
-impl Drop for Node {
-    fn drop(&mut self) {
-        let mut next = self.take_first();
-        while let Some(first) = next {
-            next = Rc::try_unwrap(first).ok().and_then(|mut node| node.take_first());
-        }
-    }
-}
-
-impl Node {
-    fn take_first(&mut self) -> Option<Rc<Node>> {
-        match self {
-            Node::Bind(first, _) | Node::Plug(first, _) => Some(std::mem::replace(first, unit())),
-            _ => None,
-        }
-    }
-}
-
-impl Drop for Frames {
-    fn drop(&mut self) {
-        let mut next = self.take_rest();
-        while let Some(rest) = next {
-            next = Rc::try_unwrap(rest).ok().and_then(|mut frames| frames.take_rest());
-        }
-    }
-}
-
-impl Frames {
-    fn take_rest(&mut self) -> Option<Rest> {
-        match self {
-            Frames::Then(_, rest) | Frames::Both(_, rest) => Some(std::mem::replace(rest, end())),
-            Frames::End => None,
-        }
-    }
-}
-
-fn value<A: Clone + 'static>(v: &Val) -> A {
-    v.downcast_ref::<A>().unwrap_or_else(|| panic!("a value of another type than {}", type_name::<A>())).clone()
-}
-
-/// A computation of an `A`.
-pub struct Comp<A> {
+/// A computation of an `A` that may ask the operations of the row `R`. Only data: nothing runs until `step`.
+/// It is run once: what is asked for many times is built by a function.
+pub struct Comp<R, A> {
     node: Node,
-    of: PhantomData<fn() -> A>,
+    of: PhantomData<fn() -> (R, A)>,
 }
 
-impl<A> Clone for Comp<A> {
-    fn clone(&self) -> Self {
-        Comp { node: self.node.clone(), of: PhantomData }
-    }
-}
-
-fn comp<A>(node: Node) -> Comp<A> {
+fn comp<R, A>(node: Node) -> Comp<R, A> {
     Comp { node, of: PhantomData }
 }
 
-pub fn pure<A: Clone + 'static>(a: A) -> Comp<A> {
-    comp(Node::Done(Rc::new(a)))
+/// The witness that an operation is answered by an `X`. Only `perform` makes one.
+pub struct Reply<X>(PhantomData<fn(X)>);
+
+impl<X> Clone for Reply<X> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<X> Copy for Reply<X> {}
+
+/// An operation's answer, given in place.
+pub struct Answer(Val);
+
+impl<X: 'static> Reply<X> {
+    pub fn give(self, x: X) -> Answer {
+        Answer(Val::new(x))
+    }
 }
 
-pub fn perform<O: Op>(op: O) -> Comp<O::Answer> {
-    comp(Node::Ask(Asking { op: Rc::new(op), name: type_name::<O>() }))
+/// What answers an operation that is never answered: no value.
+pub enum Never {}
+
+pub fn pure<R, A: 'static>(a: A) -> Comp<R, A> {
+    comp(Node::Done(Val::new(a)))
+}
+
+/// An operation of the effect `E`, asked: `perform(State::Get)`, `perform(|r| State::Put(s, r))`.
+pub fn perform<E: 'static, X: 'static, R: Has<E, I>, I>(operation: impl FnOnce(Reply<X>) -> E) -> Comp<R, X> {
+    comp(Node::Ask(Val::new(operation(Reply(PhantomData)))))
 }
 
 /// A computation built when it is reached: a call in tail position takes no stack.
-pub fn defer<A: 'static>(p: impl Fn() -> Comp<A> + 'static) -> Comp<A> {
-    comp(Node::Bind(Rc::new(Node::Done(Rc::new(()))), Rc::new(move |_| p().node)))
+pub fn defer<R, A>(p: impl Fn() -> Comp<R, A> + 'static) -> Comp<R, A> {
+    comp(bind(Node::Done(Val::new(())), move |_| p().node))
 }
 
-impl<A: Clone + 'static> Comp<A> {
-    pub fn flat_map<B: 'static>(self, f: impl Fn(A) -> Comp<B> + 'static) -> Comp<B> {
-        comp(Node::Bind(Rc::new(self.node), Rc::new(move |x| f(value(&x)).node)))
+impl<R, A: 'static> Comp<R, A> {
+    pub fn flat_map<B>(self, f: impl Fn(A) -> Comp<R, B> + 'static) -> Comp<R, B> {
+        comp(bind(self.node, move |x| f(x.take()).node))
     }
 
-    pub fn map<B: Clone + 'static>(self, f: impl Fn(A) -> B + 'static) -> Comp<B> {
-        self.flat_map(move |a| pure(f(a)))
+    pub fn map<B: 'static>(self, f: impl Fn(A) -> B + 'static) -> Comp<R, B> {
+        comp(bind(self.node, move |x| Node::Done(Val::new(f(x.take())))))
     }
 
     /// The computation after this one, whose value is not needed.
-    pub fn then<B: 'static>(self, next: impl Fn() -> Comp<B> + 'static) -> Comp<B> {
-        self.flat_map(move |_| next())
+    pub fn then<B>(self, next: impl Fn() -> Comp<R, B> + 'static) -> Comp<R, B> {
+        comp(bind(self.node, move |_| next().node))
     }
 
-    /// Where the computation comes to: its value, or an operation it asks and the rest of it.
-    pub fn step(self) -> Step<A> {
-        match machine(self.node) {
-            (Ok(x), _) => Step::Done(value(&x)),
-            (Err(asking), k) => Step::Asked(Asked { asking, k, of: PhantomData }),
-        }
+    /// The same computation in a bigger row, where rustc does not see by itself that it fits.
+    pub fn embed<S: Includes<R, Is>, Is>(self) -> Comp<S, A> {
+        comp(self.node)
     }
 
-    /// A program with nothing left to ask, run to its value.
-    pub fn run(self) -> Result<A, NoHandler> {
-        match self.step() {
-            Step::Done(a) => Ok(a),
-            Step::Asked(asked) => Err(NoHandler { op: asked.asking.name }),
+    /// The same computation in the row with `F` before: for a handler that answers with the operations of `F`.
+    pub fn also<F>(self) -> Comp<(F, R), A> {
+        comp(self.node)
+    }
+
+    /// Where the computation comes to: its value, or an operation that no handler in it answers and the rest.
+    pub fn step(self) -> Step<R, A> {
+        match machine::run(self.node) {
+            Ok(x) => Step::Done(x.take()),
+            Err((op, k)) => Step::Asked(Asked { op, k: K { k, of: PhantomData } }),
         }
     }
 }
 
-pub enum Step<A> {
+impl<A: 'static> Comp<(), A> {
+    /// A program with nothing left to ask, run to its value.
+    pub fn run(self) -> A {
+        match self.step() {
+            Step::Done(a) => a,
+            Step::Asked(_) => unreachable!("the empty row has no operation to ask"),
+        }
+    }
+}
+
+pub enum Step<R, A> {
     Done(A),
-    Asked(Asked<A>),
+    Asked(Asked<R, A>),
 }
 
 /// An operation asked by a program of an `A`, and the rest of the program.
-pub struct Asked<A> {
-    asking: Asking,
-    k: Rest,
-    of: PhantomData<fn() -> A>,
+pub struct Asked<R, A> {
+    op: Val,
+    k: K<R, A>,
 }
 
-impl<A> Asked<A> {
-    /// The name of the operation's type.
-    pub fn name(&self) -> &'static str {
-        self.asking.name
+impl<R, A> Asked<R, A> {
+    /// The operation, if it is of the effect `E`.
+    pub fn op<E: 'static, I>(&self) -> Option<&E>
+    where
+        R: Has<E, I>,
+    {
+        self.op.get()
     }
 
-    /// The operation, if it is an `O`.
-    pub fn op<O: Op>(&self) -> Option<&O> {
-        self.asking.op.downcast_ref::<O>()
-    }
-
-    /// The rest resumed with the answer of the operation, an `O`.
-    pub fn resume<O: Op>(&self, answer: O::Answer) -> Comp<A> {
-        assert!(self.asking.op.is::<O>(), "not the operation asked: {}", type_name::<O>());
-        comp(Node::Plug(Rc::new(Node::Done(Rc::new(answer))), self.k.clone()))
-    }
-}
-
-/// An operation that reached the top: its effect has no handler.
-#[derive(Debug, PartialEq)]
-pub struct NoHandler {
-    pub op: &'static str,
-}
-
-impl fmt::Display for NoHandler {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "an operation with no handler: {}", self.op)
-    }
-}
-
-impl std::error::Error for NoHandler {}
-
-type Clause = Rc<dyn Fn(&Asking, Next) -> Node>;
-
-/// The answers of a handler, in a program of an `A`: a `B`. A clause for each operation it answers.
-pub struct Handler<A, B> {
-    ret: Rc<dyn Fn(A) -> Comp<B>>,
-    clauses: Vec<(TypeId, Clause)>,
-}
-
-impl<A, B> Clone for Handler<A, B> {
-    fn clone(&self) -> Self {
-        Handler { ret: self.ret.clone(), clauses: self.clauses.clone() }
-    }
-}
-
-impl<A: Clone + 'static, B: 'static> Handler<A, B> {
-    pub fn new(ret: impl Fn(A) -> Comp<B> + 'static) -> Self {
-        Handler { ret: Rc::new(ret), clauses: Vec::new() }
-    }
-
-    /// The clause of the operation `O`: the operation, and the rest of the program.
-    pub fn on<O: Op>(mut self, clause: impl Fn(&O, K<O, B>) -> Comp<B> + 'static) -> Self {
-        let erased: Clause = Rc::new(move |asking, next| {
-            let op = asking.op.downcast_ref::<O>().expect("a clause is chosen by its operation's type");
-            clause(op, K { asking: asking.clone(), next, of: PhantomData }).node
-        });
-        self.clauses.push((TypeId::of::<O>(), erased));
-        self
-    }
-
-    /// THE FOLD: the operations of this handler answered by it, every other one asked again outside.
-    pub fn handle(&self, p: Comp<A>) -> Comp<B> {
-        let h = self.clone();
-        defer(move || match p.clone().step() {
-            Step::Done(a) => (h.ret)(a),
-            Step::Asked(asked) => {
-                let (again, k) = (h.clone(), asked.k.clone());
-                let next: Next =
-                    Rc::new(move |x| again.handle(comp(Node::Plug(Rc::new(Node::Done(x)), k.clone()))).node);
-                let asking = asked.asking;
-                match h.clauses.iter().find(|(id, _)| *id == (*asking.op).type_id()) {
-                    Some((_, clause)) => comp(clause(&asking, next)),
-                    None => comp(Node::Bind(Rc::new(Node::Ask(asking)), next)),
-                }
-            }
-        })
-    }
-}
-
-/// The rest of a handled program, waiting for the answer of the operation `O` it asked.
-pub struct K<O: Op, B> {
-    asking: Asking,
-    next: Next,
-    of: PhantomData<fn(O) -> B>,
-}
-
-impl<O: Op, B> Clone for K<O, B> {
-    fn clone(&self) -> Self {
-        K { asking: self.asking.clone(), next: self.next.clone(), of: PhantomData }
-    }
-}
-
-impl<O: Op, B> K<O, B> {
     /// The rest resumed with the answer.
-    pub fn resume(&self, answer: O::Answer) -> Comp<B> {
-        comp((self.next)(Rc::new(answer)))
+    pub fn resume<X: 'static>(&self, reply: Reply<X>, x: X) -> Comp<R, A> {
+        self.k.resume(reply, x)
+    }
+}
+
+// -- HANDLERS
+
+/// The rest of a handled program, waiting for the answer of the operation it asked: a value, to resume once,
+/// many times, later, or never. It comes to a `B`, asking the row `R`.
+pub struct K<R, B> {
+    k: Pieces,
+    of: PhantomData<fn() -> (R, B)>,
+}
+
+impl<R, B> Clone for K<R, B> {
+    fn clone(&self) -> Self {
+        K { k: self.k.clone(), of: PhantomData }
+    }
+}
+
+impl<R, B> K<R, B> {
+    /// The rest resumed with the answer; `reply` is the operation's own.
+    pub fn resume<X: 'static>(&self, _reply: Reply<X>, x: X) -> Comp<R, B> {
+        comp(Node::Resume(self.k.clone(), Val::new(x)))
     }
 
     /// The operation asked again outside, the rest resumed with what is answered there: interception, audit.
-    pub fn pass(&self) -> Comp<B> {
-        comp(Node::Bind(Rc::new(Node::Ask(self.asking.clone())), self.next.clone()))
+    pub fn pass<E: 'static, I>(&self, op: E) -> Comp<R, B>
+    where
+        R: Has<E, I>,
+    {
+        let k = self.k.clone();
+        comp(bind(Node::Ask(Val::new(op)), move |x| Node::Resume(k.clone(), x)))
     }
+}
+
+/// A handler of the effect `E`, in a program of an `A`: a `B`, asking what is left, the row `R`.
+pub struct Handler<E, A, B, R> {
+    mark: Mark,
+    state: State,
+    of: PhantomData<fn(E, A) -> (B, R)>,
+}
+
+impl<E: 'static, A: 'static, B, R> Handler<E, A, B, R> {
+    /// THE GENERAL HANDLER. A clause is given the rest of the program, `k`, as a value.
+    pub fn new(ret: impl Fn(A) -> Comp<R, B> + 'static, on: impl Fn(E, K<R, B>) -> Comp<R, B> + 'static) -> Self {
+        let ret = Box::new(move |_, a: Val| ret(a.take()).node);
+        let on = Rc::new(move |op: Val, k| on(op.take(), K { k, of: PhantomData }).node);
+        let mark = Mark { effect: TypeId::of::<E>(), mine: None, ret, clause: Clause::General(on) };
+        Handler { mark, state: Rc::new(()), of: PhantomData }
+    }
+
+    /// THE HANDLER IN PLACE: every operation answered at once, from a state the handler keeps — nothing is
+    /// captured, the program goes on. The state belongs to the path: a continuation resumed twice starts twice
+    /// from the state it was taken with.
+    pub fn in_place<S: Clone + 'static>(
+        s0: S,
+        ret: impl Fn(S, A) -> Comp<R, B> + 'static,
+        answer: impl Fn(&mut S, E) -> Answer + 'static,
+    ) -> Self {
+        let ret = Box::new(move |state, a: Val| ret(taken(state), a.take()).node);
+        let answer = Box::new(move |state: &mut State, op: Val| answer(written(state), op.take()).0);
+        let mark = Mark { effect: TypeId::of::<E>(), mine: None, ret, clause: Clause::InPlace(answer) };
+        Handler { mark, state: Rc::new(s0), of: PhantomData }
+    }
+
+    /// Of the operations of `E`, those this handler answers; any other passes outside.
+    pub fn mine(mut self, mine: impl Fn(&E) -> bool + 'static) -> Self {
+        self.mark.mine = Some(Box::new(move |op: &Val| mine(op.get().expect("an operation of the effect"))));
+        self
+    }
+
+    /// The operations of `E` answered, every other one passing outside; `E` leaves the row.
+    pub fn handle<In: Has<E, I, Rest = R>, I>(self, p: Comp<In, A>) -> Comp<R, B> {
+        comp(Node::Handle(Box::new((Rc::new(self.mark), self.state, p.node))))
+    }
+
+    /// `handle`, the effect kept in the row: a clause may ask the operation again — interception, audit.
+    pub fn intercept<I>(self, p: Comp<R, A>) -> Comp<R, B>
+    where
+        R: Has<E, I>,
+    {
+        comp(Node::Handle(Box::new((Rc::new(self.mark), self.state, p.node))))
+    }
+}
+
+/// A handler's state to be written: this path's alone — one shared with a continuation is copied first.
+fn written<S: Clone + 'static>(state: &mut State) -> &mut S {
+    if Rc::get_mut(state).is_none() {
+        *state = Rc::new(state.downcast_ref::<S>().expect("the state of this handler").clone());
+    }
+    Rc::get_mut(state).and_then(|alone| alone.downcast_mut()).expect("the state of this handler")
+}
+
+/// A handler's state at the end of its program.
+fn taken<S: Clone + 'static>(state: State) -> S {
+    let state = state.downcast::<S>().expect("the state of this handler");
+    Rc::try_unwrap(state).unwrap_or_else(|shared| (*shared).clone())
 }

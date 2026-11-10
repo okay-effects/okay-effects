@@ -2,11 +2,11 @@
 //! and choices nested in any order, each effect under two identities — and the digest of their outcomes. The digest
 //! is the reference machine's; the Scala and the Java kernels of this repository come to the same number.
 
-use std::cell::Cell;
+use std::cell;
 use std::rc::Rc;
 
-use okay_algebraic::effects::{Among, all, among};
-use okay_algebraic::*;
+use okay_effects::effects::Choose;
+use okay_effects::*;
 
 /// java.util.Random, which the reference draws its programs from
 struct JRandom(u64);
@@ -70,66 +70,68 @@ fn random(r: &mut JRandom, depth: i32) -> Rc<T> {
     })
 }
 
-// the effects: an identity `e` in the operation — a handler answers its own, and asks any other again outside
-struct TellOp(i32, i32);
-struct GetOp(i32);
-struct PutOp(i32, i32);
-struct RaiseOp(i32, i32);
+// the effects: an identity `e` in the operation — a handler answers its own, and any other passes outside
+enum Log {
+    Tell(i32, i32, Reply<()>),
+}
+enum Cell {
+    Get(i32, Reply<i32>),
+    Put(i32, i32, Reply<()>),
+}
+enum Fail {
+    Raise(i32, i32, Reply<i32>),
+}
 
-impl Op for TellOp { type Answer = (); }
-impl Op for GetOp { type Answer = i32; }
-impl Op for PutOp { type Answer = (); }
-impl Op for RaiseOp { type Answer = i32; }
+type Program = Comp<row![Log, Cell, Fail, Choose], i32>;
 
-fn writer(e: i32, p: Comp<i32>) -> Comp<i32> {
-    Handler::new(|a: i32| pure((0i32, a)))
-        .on(move |tell: &TellOp, k| {
-            if tell.0 != e {
-                return k.pass();
-            }
-            let n = tell.1;
-            k.resume(()).map(move |(sum, a)| (sum.wrapping_add(n), a))
-        })
-        .handle(p)
+fn writer(e: i32, p: Program) -> Program {
+    let on = |op, k: K<_, (i32, i32)>| match op {
+        Log::Tell(_, n, r) => k.resume(r, ()).map(move |(sum, a)| (sum.wrapping_add(n), a)),
+    };
+    Handler::new(|a| pure((0, a)), on)
+        .mine(move |op| matches!(op, Log::Tell(id, _, _) if *id == e))
+        .intercept(p)
         .map(|(sum, a)| a.wrapping_mul(100).wrapping_add(sum))
 }
 
-/// the TCK's state is a cell, made where the handler is installed: one for every resumption taken past it
-fn state(e: i32, s0: i32, p: Comp<i32>) -> Comp<i32> {
-    let s = Rc::new(Cell::new(s0));
-    let (at_end, read, write) = (s.clone(), s.clone(), s);
-    Handler::new(move |a: i32| pure(a.wrapping_mul(10).wrapping_add(at_end.get())))
-        .on(move |get: &GetOp, k| if get.0 == e { k.resume(read.get()) } else { k.pass() })
-        .on(move |put: &PutOp, k| {
-            if put.0 != e {
-                return k.pass();
-            }
-            write.set(put.1);
-            k.resume(())
-        })
-        .handle(p)
+/// the TCK's state is a cell made where the handler is installed: one for every resumption taken past it —
+/// not the state of `effects::State`, which each path has its own
+fn state(e: i32, s0: i32, p: Program) -> Program {
+    let s = Rc::new(cell::Cell::new(s0));
+    let at_end = s.clone();
+    let answer = move |_: &mut (), op| match op {
+        Cell::Get(_, r) => r.give(s.get()),
+        Cell::Put(_, n, r) => {
+            s.set(n);
+            r.give(())
+        }
+    };
+    Handler::in_place((), move |_, a: i32| pure(a.wrapping_mul(10).wrapping_add(at_end.get())), answer)
+        .mine(move |op| matches!(op, Cell::Get(id, _) | Cell::Put(id, _, _) if *id == e))
+        .intercept(p)
 }
 
-fn throws(e: i32, p: Comp<i32>) -> Comp<i32> {
-    Handler::new(|a: i32| pure(a))
-        .on(move |raise: &RaiseOp, k| if raise.0 == e { pure(-1 - raise.1) } else { k.pass() })
-        .handle(p)
+fn throws(e: i32, p: Program) -> Program {
+    let on = |op, _| match op {
+        Fail::Raise(_, n, _) => pure(-1 - n),
+    };
+    Handler::new(pure, on).mine(move |op| matches!(op, Fail::Raise(id, _, _) if *id == e)).intercept(p)
 }
 
-fn build(t: &Rc<T>) -> Comp<i32> {
+fn build(t: &Rc<T>) -> Program {
     match &**t {
         T::Pure(n) => pure(*n),
-        T::Tell(e, n) => { let n = *n; perform(TellOp(*e, n)).map(move |_| n) }
-        T::Get(e) => perform(GetOp(*e)),
-        T::Put(e, n) => { let n = *n; perform(PutOp(*e, n)).map(move |_| n) }
-        T::Among(ns) => among(ns.clone()),
-        T::Raise(e, n) => perform(RaiseOp(*e, *n)),
+        T::Tell(e, n) => { let (e, n) = (*e, *n); perform(move |r| Log::Tell(e, n, r)).map(move |_: ()| n) }
+        T::Get(e) => { let e = *e; perform(move |r| Cell::Get(e, r)) }
+        T::Put(e, n) => { let (e, n) = (*e, *n); perform(move |r| Cell::Put(e, n, r)).map(move |_: ()| n) }
+        T::Among(ns) => Choose::among(ns.clone()),
+        T::Raise(e, n) => { let (e, n) = (*e, *n); perform(move |r| Fail::Raise(e, n, r)) }
         T::Seq(a, b) => { let b = b.clone(); build(a).then(move || build(&b)) }
         T::Add(a, b) => { let b = b.clone(); build(a).flat_map(move |i| build(&b).map(move |j| i.wrapping_add(j))) }
         T::WriterH(e, body) => writer(*e, build(body)),
         T::StateH(e, s0, body) => state(*e, *s0, build(body)),
         T::ThrowsH(e, body) => throws(*e, build(body)),
-        T::ChooseH(body) => all::<i32, i32>(build(body)).map(|vs| vs.iter().fold(0i32, |s, v| s.wrapping_add(*v))),
+        T::ChooseH(body) => Choose::all(build(body)).map(|vs| vs.iter().fold(0i32, |s, v| s.wrapping_add(*v))).embed(),
     }
 }
 
@@ -148,11 +150,11 @@ fn a_thousand_random_programs_the_reference_machines_digest() {
         t = Rc::new(T::ThrowsH(1, t));
         t = Rc::new(T::ThrowsH(0, t));
         t = Rc::new(T::ChooseH(t));
-        let outcome = build(&t).run().unwrap_or(-1000000); // no handler
+        let outcome = match build(&t).step() {
+            Step::Done(value) => value,
+            Step::Asked(_) => -1000000, // no handler
+        };
         d = d.wrapping_mul(31).wrapping_add(outcome as i64);
     }
     assert_eq!(d, DIGEST);
 }
-
-#[allow(dead_code)]
-fn used(_: Among<i32>) {}
