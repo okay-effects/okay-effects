@@ -3,7 +3,7 @@ package okay.effects.java;
 import java.util.function.Function;
 
 /** Where a computation came to: its value, or an operation it asks and the rest of it. */
-public sealed interface Step<R, A> {
-  record Done<R, A>(A value) implements Step<R, A> {}
-  record Asked<R, X, A>(Op<?, X> op, Function<X, Comp<R, A>> k) implements Step<R, A> {}
+public sealed interface Step<A, R> {
+  record Done<A, R>(A value) implements Step<A, R> {}
+  record Asked<X, A, R>(Op<?, X> op, Function<X, Comp<A, R>> k) implements Step<A, R> {}
 }

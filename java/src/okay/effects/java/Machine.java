@@ -37,7 +37,7 @@ final class Machine {
     public Comp apply(Object x) { return new Comp.Resume(this, x); }
   }
 
-  static <R, A> Step<R, A> run(Comp<R, A> p) {
+  static <A, R> Step<A, R> run(Comp<A, R> p) {
     Comp c = p;
     Frames frames = null;
     Mark mark = null;

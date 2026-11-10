@@ -11,12 +11,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
-import okay.effects.java.Body;
 import okay.effects.java.Comp;
 import okay.effects.java.Handler;
-import okay.effects.java.In;
+import okay.effects.java.Eff;
 import okay.effects.java.K;
-import okay.effects.java.Nil;
+import okay.effects.java.Pure;
 import okay.effects.java.Op;
 
 /** ASYNC: an answer that comes later. An operation gives a callback to whoever will have the answer; the handler
@@ -26,37 +25,38 @@ public sealed interface Async {
   record Await<X>(Consumer<Consumer<X>> register) implements Async, Op<Async, X> {}
 
   /** the answer {@code register} will be called back with */
-  static <R, X> Comp<R, X> await(In<Async, R> in, Consumer<Consumer<X>> register) {
-    return perform(in, new Await<>(register));
+  static <X> Comp<X, Eff<Async, ?>> await(Consumer<Consumer<X>> register) {
+    return perform(new Await<>(register));
   }
 
-  static <R> Comp<R, Void> sleep(In<Async, R> in, long millis) {
-    return await(in, resume -> Timer.ONE.schedule(() -> resume.accept(null), millis, TimeUnit.MILLISECONDS));
+  static Comp<Void, Eff<Async, ?>> sleep(long millis) {
+    return await(resume -> Timer.ONE.schedule(() -> resume.accept(null), millis, TimeUnit.MILLISECONDS));
   }
 
   /** the program started; {@code done} is called with its value, now or later. Returns as soon as the program
    * waits. */
-  static <A> void start(Body<Async, Nil, A> body, Consumer<A> done) {
+  static <A> void start(Comp<A, ? super Eff<Async, Pure>> p, Consumer<A> done) {
     Turns turns = new Turns();
-    Comp<Nil, Void> started = handle(Async.class, new Handler<Async, A, Void, Nil>() {
-      public Comp<Nil, Void> ret(A a) { done.accept(a); return pure(null); }
-      public Comp<Nil, Void> on(Async op, K<Nil, Void> k) {
+    Comp<Void, Pure> started = handle(Async.class, new Handler<Async, A, Void, Pure>() {
+      public Comp<Void, Pure> ret(A a) { done.accept(a); return pure(null); }
+      public Comp<Void, Pure> on(Async op, K<Void, Pure> k) {
         return switch (op) {
           case Await<?> await -> registered(await, k, turns);
         };
       }
-    }, body);
+    }, p);
     turns.take(() -> run(started));
   }
 
-  private static <X> Comp<Nil, Void> registered(Await<X> await, K<Nil, Void> k, Turns turns) {
+  private static <X> Comp<Void, Pure> registered(Await<X> await, K<Void, Pure> k, Turns turns) {
     await.register().accept(x -> turns.take(() -> run(k.resume(await, x))));
     return pure(null);
   }
 
   /** both programs at once; their values when both have come */
-  static <A, B, R> Comp<R, Pair<A, B>> both(In<Async, R> in, Body<Async, Nil, A> a, Body<Async, Nil, B> b) {
-    return await(in, resume -> {
+  static <A, B> Comp<Pair<A, B>, Eff<Async, ?>> both(
+      Comp<A, ? super Eff<Async, Pure>> a, Comp<B, ? super Eff<Async, Pure>> b) {
+    return await(resume -> {
       List<A> left = new ArrayList<>(); // none or one: a value that came, waiting for the other
       List<B> right = new ArrayList<>();
       Object lock = new Object();
@@ -74,9 +74,9 @@ public sealed interface Async {
   }
 
   /** all the programs at once; their values, in the programs' order */
-  static <A, R> Comp<R, List<A>> all(In<Async, R> in, List<Body<Async, Nil, A>> ps) {
+  static <A> Comp<List<A>, Eff<Async, ?>> all(List<? extends Comp<A, ? super Eff<Async, Pure>>> ps) {
     if (ps.isEmpty()) return pure(List.of());
-    return both(in, ps.get(0), rest -> all(rest, ps.subList(1, ps.size()))).map(pair -> {
+    return both(ps.get(0), all(ps.subList(1, ps.size()))).map(pair -> {
       List<A> values = new ArrayList<>(List.of(pair.first()));
       values.addAll(pair.second());
       return values;
@@ -84,8 +84,8 @@ public sealed interface Async {
   }
 
   /** both programs at once; the value that comes first — the other's is dropped */
-  static <A, R> Comp<R, A> race(In<Async, R> in, Body<Async, Nil, A> a, Body<Async, Nil, A> b) {
-    return await(in, resume -> {
+  static <A> Comp<A, Eff<Async, ?>> race(Comp<A, ? super Eff<Async, Pure>> a, Comp<A, ? super Eff<Async, Pure>> b) {
+    return await(resume -> {
       AtomicBoolean won = new AtomicBoolean(false);
       start(a, x -> { if (won.compareAndSet(false, true)) resume.accept(x); });
       start(b, x -> { if (won.compareAndSet(false, true)) resume.accept(x); });
@@ -93,20 +93,19 @@ public sealed interface Async {
   }
 
   /** the future's outcome, awaited */
-  static <A, R> Comp<R, Throws.Result<Throwable, A>> fromFuture(
-      In<Async, R> in, Supplier<CompletableFuture<A>> future) {
-    return await(in, resume -> future.get().whenComplete((a, failure) ->
+  static <A> Comp<Throws.Result<Throwable, A>, Eff<Async, ?>> fromFuture(Supplier<CompletableFuture<A>> future) {
+    return await(resume -> future.get().whenComplete((a, failure) ->
         resume.accept(failure == null ? new Throws.Ok<>(a) : new Throws.Err<>(failure))));
   }
 
-  static <A> CompletableFuture<A> toFuture(Body<Async, Nil, A> body) {
+  static <A> CompletableFuture<A> toFuture(Comp<A, ? super Eff<Async, Pure>> p) {
     CompletableFuture<A> future = new CompletableFuture<>();
-    start(body, future::complete);
+    start(p, future::complete);
     return future;
   }
 
   /** the program's value, this thread waiting for it: the edge of a program that is not asynchronous itself */
-  static <A> A runBlocking(Body<Async, Nil, A> body) { return toFuture(body).join(); }
+  static <A> A runBlocking(Comp<A, ? super Eff<Async, Pure>> p) { return toFuture(p).join(); }
 }
 
 /** The one thread that wakes the sleeping; it runs nothing of a program but the callback. */

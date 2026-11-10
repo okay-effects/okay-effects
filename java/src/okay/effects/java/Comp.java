@@ -4,29 +4,30 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 /** A computation of an {@code A} that may ask the operations of the row {@code R}. Only data: nothing runs until
- * {@code step}. Made by the functions of {@link Effects}, never directly: an operation is asked with evidence. */
-public abstract sealed class Comp<R, A> {
+ * {@code step}. Made by the functions of {@link Effects}, never directly. Whoever takes a computation takes one
+ * that asks no more than the row at hand: {@code Comp<A, ? super R>}. */
+public abstract sealed class Comp<A, R> {
   /** a value */
-  static final class Done<R, A> extends Comp<R, A> {
+  static final class Done<A, R> extends Comp<A, R> {
     final A value;
     Done(A value) { this.value = value; }
   }
 
   /** a question: an operation, to be answered */
-  static final class Ask<R, X> extends Comp<R, X> {
+  static final class Ask<X, R> extends Comp<X, R> {
     final Op<?, X> op;
     Ask(Op<?, X> op) { this.op = op; }
   }
 
-  /** a computation, and what follows its value */
-  static final class Bind<R, X, A> extends Comp<R, A> {
-    final Comp<R, X> first;
-    final Function<X, Comp<R, A>> next;
-    Bind(Comp<R, X> first, Function<X, Comp<R, A>> next) { this.first = first; this.next = next; }
+  /** a computation, and what follows its value; the rows of the two were checked where they were bound */
+  static final class Bind<X, A, R> extends Comp<A, R> {
+    final Comp<X, ?> first;
+    final Function<X, ? extends Comp<A, ?>> next;
+    Bind(Comp<X, ?> first, Function<X, ? extends Comp<A, ?>> next) { this.first = first; this.next = next; }
   }
 
   /** a computation under a handler, with the handler's state */
-  static final class Handle<R, A> extends Comp<R, A> {
+  static final class Handle<A, R> extends Comp<A, R> {
     final Machine.Mark mark;
     final Object state;
     final Comp<?, ?> body;
@@ -34,20 +35,25 @@ public abstract sealed class Comp<R, A> {
   }
 
   /** a continuation taken earlier, resumed with an answer */
-  static final class Resume<R, A> extends Comp<R, A> {
+  static final class Resume<A, R> extends Comp<A, R> {
     final Machine.Pieces k;
     final Object x;
     Resume(Machine.Pieces k, Object x) { this.k = k; this.x = x; }
   }
 
-  public final <B> Comp<R, B> flatMap(Function<A, Comp<R, B>> f) { return new Bind<>(this, f); }
+  /** this, then what {@code f} makes of its value. The row {@code Q} is one that has the effects of both: the
+   * compiler finds it. */
+  public final <B, Q extends R> Comp<B, Q> flatMap(Function<A, ? extends Comp<B, ? super Q>> f) {
+    return new Bind<>(this, f);
+  }
 
-  public final <B> Comp<R, B> map(Function<A, B> f) { return new Bind<>(this, a -> new Done<>(f.apply(a))); }
+  public final <B, Q extends R> Comp<B, Q> map(Function<A, B> f) {
+    return new Bind<>(this, a -> new Done<>(f.apply(a)));
+  }
 
-  /** the computation after this one, whose value is not needed */
-  public final <B> Comp<R, B> then(Supplier<Comp<R, B>> next) { return new Bind<>(this, a -> next.get()); }
-
-  /** the same computation where a longer row is wanted: it asks no more than it did */
-  @SuppressWarnings("unchecked") // a row is only a type: no value of a computation depends on it
-  public final <F> Comp<Cons<F, R>, A> up() { return (Comp<Cons<F, R>, A>) this; }
+  /** the computation after this one, whose value is not needed. Where the two have different rows, write
+   * {@code flatMap(done -> ..)}: javac finds the common row only through a lambda that has a parameter. */
+  public final <B, Q extends R> Comp<B, Q> then(Supplier<? extends Comp<B, ? super Q>> next) {
+    return new Bind<>(this, a -> next.get());
+  }
 }

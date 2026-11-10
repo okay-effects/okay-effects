@@ -13,15 +13,12 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
-import java.util.function.Function;
 import java.util.stream.LongStream;
-import okay.effects.java.Body;
 import okay.effects.java.Comp;
-import okay.effects.java.Cons;
+import okay.effects.java.Eff;
 import okay.effects.java.Handler;
-import okay.effects.java.In;
 import okay.effects.java.K;
-import okay.effects.java.Nil;
+import okay.effects.java.Pure;
 import okay.effects.java.std.Async;
 import okay.effects.java.std.Emit;
 import okay.effects.java.std.Throws;
@@ -83,98 +80,100 @@ public final class Demo {
     /** those who wait for a name to be opened, in the order they came */
     private final Map<String, List<Consumer<Json>>> waiting = new HashMap<>();
 
-    static <R> Comp<R, Json> refused(Worker.Row<R> in, String name) {
-      return Throws.raise(in.fails(), new Condition("TypeError", name + ": not its arguments"));
+    static Comp<Json, Worker.Row> refused(String name) {
+      return fit(Throws.raise(new Condition("TypeError", name + ": not its arguments")));
     }
 
-    static <R> Comp<R, Json> add(Worker.Row<R> in, List<Json> args) {
+    static Comp<Json, Worker.Row> add(List<Json> args) {
       return args.size() == 2 && args.get(0) instanceof Json.Int(long a) && args.get(1) instanceof Json.Int(long b)
           ? pure(Json.of(a + b))
-          : refused(in, "t:add");
+          : refused("t:add");
     }
 
-    static <R> Comp<R, Json> echo(Worker.Row<R> in, List<Json> args) {
-      return args.size() == 1 ? pure(args.get(0)) : refused(in, "t:echo");
+    static Comp<Json, Worker.Row> echo(List<Json> args) {
+      return args.size() == 1 ? pure(args.get(0)) : refused("t:echo");
     }
 
-    static <R> Comp<R, Json> sum(Worker.Row<R> in, List<Json> args) {
-      if (!(args.size() == 1 && args.get(0) instanceof Json.Arr(List<Json> values))) return refused(in, "t:sum");
+    static Comp<Json, Worker.Row> sum(List<Json> args) {
+      if (!(args.size() == 1 && args.get(0) instanceof Json.Arr(List<Json> values))) return refused("t:sum");
       return pure(Json.of(values.stream().mapToLong(value -> value instanceof Json.Int(long n) ? n : 0).sum()));
     }
 
-    static <R> Comp<R, Json> boom(Worker.Row<R> in, List<Json> args) {
-      return args.isEmpty() ? Throws.raise(in.fails(), new Condition("ValueError", "no")) : refused(in, "t:boom");
+    static Comp<Json, Worker.Row> boom(List<Json> args) {
+      return args.isEmpty() ? fit(Throws.raise(new Condition("ValueError", "no"))) : refused("t:boom");
     }
 
-    static <R> Comp<R, Json> pairs(Worker.Row<R> in, List<Json> args) {
-      if (!args.isEmpty()) return refused(in, "t:pairs");
-      return call(in.host(), "choose", Json.of(ints(1, 2))).map(choice -> times(10, choice));
+    static Comp<Json, Worker.Row> pairs(List<Json> args) {
+      if (!args.isEmpty()) return refused("t:pairs");
+      return up(call("choose", Json.of(ints(1, 2)))).map(choice -> times(10, choice));
     }
 
-    static <R> Comp<R, Json> quote(Worker.Row<R> in, List<Json> args) {
+    static Comp<Json, Worker.Row> quote(List<Json> args) {
       return args.size() == 1
-          ? call(in.host(), "price_of", args.get(0)).map(price -> times(2, price))
-          : refused(in, "t:quote");
+          ? up(call("price_of", args.get(0))).map(price -> times(2, price))
+          : refused("t:quote");
     }
 
-    static <R> Comp<R, Json> total(Worker.Row<R> in, List<Json> items) { return total(in.host(), items, 0, 0); }
+    static Comp<Json, Worker.Row> total(List<Json> items) { return fit(up(total(items, 0, 0))); }
 
-    private static <R> Comp<R, Json> total(In<Foreign, R> host, List<Json> items, int i, long sum) {
+    private static Comp<Json, Eff<Foreign, ?>> total(List<Json> items, int i, long sum) {
       if (i == items.size()) return pure(Json.of(sum));
-      return call(host, "price_of", items.get(i)).flatMap(answer -> {
+      return call("price_of", items.get(i)).flatMap(answer -> {
         if (!(answer instanceof Json.Int(long price))) throw new IllegalArgumentException("a price: " + answer.text());
-        return total(host, items, i + 1, sum + price);
+        return total(items, i + 1, sum + price);
       });
     }
 
-    static <R> Comp<R, Json> count(Worker.Row<R> in, List<Json> args) {
-      return args.size() == 1 ? count(in.host(), args.get(0), 0) : refused(in, "t:count");
+    static Comp<Json, Worker.Row> count(List<Json> args) {
+      return args.size() == 1 ? fit(up(count(args.get(0), 0))) : refused("t:count");
     }
 
-    private static <R> Comp<R, Json> count(In<Foreign, R> host, Json n, long done) {
-      return n.equals(Json.of(done)) ? pure(n) : call(host, "tick").then(() -> count(host, n, done + 1));
+    private static Comp<Json, Eff<Foreign, ?>> count(Json n, long done) {
+      return n.equals(Json.of(done)) ? pure(n) : call("tick").then(() -> count(n, done + 1));
     }
 
-    <R> Comp<R, Json> numbers(Worker.Row<R> in, List<Json> args) {
-      if (!(args.size() == 1 && args.get(0) instanceof Json.Int(long n))) return refused(in, "t:numbers");
+    Comp<Json, Worker.Row> numbers(List<Json> args) {
+      if (!(args.size() == 1 && args.get(0) instanceof Json.Int(long n))) return refused("t:numbers");
       sent = 0;
-      return numbers(in.out(), 1, n);
+      return fit(up(up(numbers(1, n))));
     }
 
-    private <R> Comp<R, Json> numbers(In<Emit<Json>, R> out, long next, long last) {
+    private Comp<Json, Eff<Emit<Json>, ?>> numbers(long next, long last) {
       if (next > last) return pure(Json.NULL);
-      return Emit.send(out, Json.of(next)).then(() -> {
+      return Emit.send(Json.of(next)).then(() -> {
         sent++;
-        return numbers(out, next + 1, last);
+        return numbers(next + 1, last);
       });
     }
 
-    <R> Comp<R, Json> sent(Worker.Row<R> in, List<Json> args) {
-      return args.isEmpty() ? defer(() -> pure(Json.of(sent))) : refused(in, "t:sent");
+    Comp<Json, Worker.Row> sent(List<Json> args) {
+      return args.isEmpty() ? defer(() -> pure(Json.of(sent))) : refused("t:sent");
     }
 
-    static <R> Comp<R, Json> dedup(Worker.Row<R> in, List<Json> args) {
-      return args.isEmpty() ? dedup(in, Set.of()) : refused(in, "t:dedup");
+    static Comp<Json, Worker.Row> dedup(List<Json> args) {
+      return args.isEmpty() ? dedup(Set.of()) : refused("t:dedup");
     }
 
-    private static <R> Comp<R, Json> dedup(Worker.Row<R> in, Set<Json> seen) {
-      return Fed.next(in.fed()).flatMap(next -> {
+    private static Comp<Json, Worker.Row> dedup(Set<Json> seen) {
+      return up(up(up(Fed.next()))).flatMap(next -> {
         if (next.isEmpty()) return pure(Json.NULL);
-        if (seen.contains(next.get())) return dedup(in, seen);
+        if (seen.contains(next.get())) return dedup(seen);
         // a new set, the old one kept: the rest of a program is a value, and may be resumed again
         Set<Json> more = new HashSet<>(seen);
         more.add(next.get());
-        return Emit.send(in.out(), next.get()).then(() -> dedup(in, more));
+        return up(up(Emit.send(next.get()))).flatMap(sent -> dedup(more));
       });
     }
 
-    <R> Comp<R, Json> await(Worker.Row<R> in, List<Json> args) {
-      if (!(args.size() == 1 && args.get(0) instanceof Json.Str(String name))) return refused(in, "t:wait");
-      return Async.await(in.async(), resume -> waiting.computeIfAbsent(name, none -> new ArrayList<>()).add(resume));
+    Comp<Json, Worker.Row> await(List<Json> args) {
+      if (!(args.size() == 1 && args.get(0) instanceof Json.Str(String name))) return refused("t:wait");
+      Comp<Json, Eff<Async, ?>> woken = Async.await(resume ->
+          waiting.computeIfAbsent(name, none -> new ArrayList<>()).add(resume));
+      return fit(up(up(up(up(woken)))));
     }
 
-    <R> Comp<R, Json> open(Worker.Row<R> in, List<Json> args) {
-      if (!(args.size() == 1 && args.get(0) instanceof Json.Str(String name))) return refused(in, "t:open");
+    Comp<Json, Worker.Row> open(List<Json> args) {
+      if (!(args.size() == 1 && args.get(0) instanceof Json.Str(String name))) return refused("t:open");
       // those woken are answered now, before this call's own answer
       List<Consumer<Json>> woken = Optional.ofNullable(waiting.remove(name)).orElse(List.of());
       woken.forEach(resume -> resume.accept(args.get(0)));
@@ -195,10 +194,10 @@ public final class Demo {
   private static final Map<String, Long> PRICES = Map.of("tea", 3L, "milk", 2L);
 
   /** this side's answers: every choice taken, a price looked up, a tick counted */
-  static <R> Comp<R, List<Json>> answered(Body<Foreign, R, Json> body) {
+  static <R> Comp<List<Json>, R> answered(Comp<Json, ? super Eff<Foreign, R>> p) {
     return handle(Foreign.class, new Handler<Foreign, Json, List<Json>, R>() {
-      public Comp<R, List<Json>> ret(Json a) { return pure(List.of(a)); }
-      public Comp<R, List<Json>> on(Foreign op, K<R, List<Json>> k) {
+      public Comp<List<Json>, R> ret(Json a) { return pure(List.of(a)); }
+      public Comp<List<Json>, R> on(Foreign op, K<List<Json>, R> k) {
         return switch (op) {
           case Foreign.Call c -> {
             Json arg = c.args().isEmpty() ? Json.NULL : c.args().get(0);
@@ -213,12 +212,12 @@ public final class Demo {
           }
         };
       }
-    }, body);
+    }, p);
   }
 
   /** the rest of the program resumed with each of the values in turn: what every path found */
-  private static <R> Comp<R, List<Json>> each(
-      Foreign.Call c, List<Json> values, int i, List<Json> found, K<R, List<Json>> k) {
+  private static <R> Comp<List<Json>, R> each(
+      Foreign.Call c, List<Json> values, int i, List<Json> found, K<List<Json>, R> k) {
     if (i == values.size()) return pure(found);
     return k.resume(c, values.get(i)).flatMap(more -> {
       List<Json> all = new ArrayList<>(found);
@@ -227,17 +226,14 @@ public final class Demo {
     });
   }
 
-  /** A program of a far side that may fail: made from the evidence of both. The row is written out here, once. */
-  interface Script<A> extends Function<Far.Failing<Cons<Throws<Condition>, Cons<Far, Nil>>>,
-      Comp<Cons<Throws<Condition>, Cons<Far, Nil>>, A>> {}
-
   /** the program's value on a far side, or the far side's failure */
-  static <A> Throws.Result<Condition, A> attempt(Remote far, Script<A> p) {
-    return far.run(fr -> Throws.run(th -> p.apply(new Far.Failing<>(fr.up(), th))));
+  static <A> Throws.Result<Condition, A> attempt(
+      Remote far, Comp<A, ? super Eff<Throws<Condition>, Eff<Far, Pure>>> p) {
+    return far.run(Throws.run(p));
   }
 
   /** the same, as a line says it */
-  static <A> String on(Remote far, Script<A> p) {
+  static <A> String on(Remote far, Comp<A, ? super Eff<Throws<Condition>, Eff<Far, Pure>>> p) {
     return switch (attempt(far, p)) {
       case Throws.Ok<Condition, A>(A value) -> value instanceof Json json ? json.text() : String.valueOf(value);
       case Throws.Err<Condition, A>(Condition c) -> c.kind + ": " + c.message;
@@ -245,10 +241,12 @@ public final class Demo {
   }
 
   /** every answer of a far program, under this side's handler of what it asks */
-  private static <R> Comp<R, Json> all(Body<Foreign, R, Json> program) { return answered(program).map(Json::of); }
+  private static <R> Comp<Json, R> all(Comp<Json, ? super Eff<Foreign, R>> program) {
+    return answered(program).map(Json::of);
+  }
 
   /** every value a stream sends */
-  static <R> Comp<R, Json> sent(Body<Emit<Json>, R, Void> stream) {
+  static <R> Comp<Json, R> sent(Comp<Void, ? super Eff<Emit<Json>, R>> stream) {
     return Emit.collect(stream).map(sent -> Json.of(sent.values()));
   }
 
@@ -257,48 +255,46 @@ public final class Demo {
   static List<String> script(BiFunction<Boolean, Optional<String>, Remote> open) {
     List<String> lines = new ArrayList<>();
     try (Remote far = open.apply(false, Optional.empty())) {
-      lines.add("pairs " + on(far, in -> all(host -> Far.program(in.up(), host, "t:pairs", List.of()))));
+      lines.add("pairs " + on(far, all(Far.program("t:pairs", List.of()))));
       List<Json> items = List.of(Json.of("tea"), Json.of("milk"));
-      lines.add("total " + on(far, in -> all(host -> Far.program(in.up(), host, "shop:total", items))));
-      lines.add("count " + on(far, in -> all(host -> Far.program(in.up(), host, "t:count", ints(10000)))));
-      lines.add("call " + on(far, in -> Far.call(in, "t:add", Json.of(2), Json.of(3))));
+      lines.add("total " + on(far, all(Far.program("shop:total", items))));
+      lines.add("count " + on(far, all(Far.program("t:count", ints(10000)))));
+      lines.add("call " + on(far, Far.call("t:add", Json.of(2), Json.of(3))));
       // an object kept on the far side: its method, its attribute; released, it is refused by name
-      if (!(attempt(far, in -> Far.hold(in, "t:counter", Json.of(10))) instanceof Throws.Ok<Condition, Json.Ref>(
+      if (!(attempt(far, Far.hold("t:counter", Json.of(10))) instanceof Throws.Ok<Condition, Json.Ref>(
           Json.Ref counter))) {
         throw new IllegalStateException("t:counter was not held");
       }
-      lines.add("held " + counter.kind() + " " + on(far, in -> Far.method(in, counter, "inc", Json.of(5))
-          .flatMap(after -> Far.attr(in, counter, "n").map(n -> after.text() + " " + n.text()))));
-      String released = on(far, in -> Far.release(in, counter).then(() -> Far.attr(in, counter, "n")));
+      lines.add("held " + counter.kind() + " " + on(far, Far.method(counter, "inc", Json.of(5))
+          .flatMap(after -> Far.attr(counter, "n").map(n -> after.text() + " " + n.text()))));
+      String released = on(far, Far.release(counter).then(() -> Far.attr(counter, "n")));
       lines.add("released " + released.split(":")[0]);
       // a value kept: its ref, given to a call, is the value again
-      lines.add("value " + on(far, in -> Far.hold(in, "t:echo", Json.of(ints(1, 2, 3))).flatMap(list ->
-          Far.call(in, "t:sum", list).flatMap(sum ->
-              Far.release(in, list).map(done -> list.kind() + " " + sum.text())))));
-      lines.add("condition " + on(far, in -> Far.call(in, "t:boom")));
+      lines.add("value " + on(far, Far.hold("t:echo", Json.of(ints(1, 2, 3))).flatMap(list ->
+          Far.call("t:sum", list).flatMap(sum ->
+              Far.release(list).map(done -> list.kind() + " " + sum.text())))));
+      lines.add("condition " + on(far, Far.call("t:boom")));
       Json odd = Json.of(List.of(Json.of(9007199254740993L), new Json.Dec(Double.NaN), new Json.Dec(3.0),
           new Json.Dec(0.5), Json.obj("a", Json.of(1))));
-      lines.add("escapes " + on(far, in -> Far.call(in, "t:echo", odd).map(Escapes::enc)));
-      lines.add("stream " + on(far, in -> sent(out -> Far.stream(in.up(), out, "t:numbers", ints(5), 2))));
+      lines.add("escapes " + on(far, Far.call("t:echo", odd).map(Escapes::enc)));
+      lines.add("stream " + on(far, sent(Far.stream("t:numbers", ints(5), 2))));
       // three taken of a hundred: the far side was two ahead, and was stopped there
-      lines.add("cancel " + on(far, in -> sent(out -> Emit.take(out, 3, cut ->
-          Far.stream(in.<Emit<Json>>up().up(), cut, "t:numbers", ints(100), 2))))
-          + " " + on(far, in -> Far.call(in, "t:sent")));
-      lines.add("duplex " + on(far, in -> sent(out ->
-          Far.stream(in.up(), out, "t:dedup", List.of(), 2, fed -> Emit.sendAll(fed, ints(3, 1, 3, 2, 1))))));
+      lines.add("cancel " + on(far, sent(Emit.take(3, under(Far.stream("t:numbers", ints(100), 2)))))
+          + " " + on(far, Far.call("t:sent")));
+      lines.add("duplex " + on(far, sent(Far.stream("t:dedup", List.of(), 2, Emit.sendAll(ints(3, 1, 3, 2, 1))))));
       // the second call is answered while the first still waits
-      lines.add("mux " + on(far, in -> Far.start(in.far(), "t:wait", Json.of("g")).flatMap(waits ->
-          Far.start(in.far(), "t:open", Json.of("g")).flatMap(opens ->
-              Far.result(in, opens).flatMap(opened ->
-                  Far.result(in, waits).map(waited -> Json.of(List.of(opened, waited))))))));
+      lines.add("mux " + on(far, up(Far.start("t:wait", Json.of("g"))).flatMap(waits ->
+          up(Far.start("t:open", Json.of("g"))).flatMap(opens ->
+              Far.result(opens).flatMap(opened ->
+                  Far.result(waits).map(waited -> Json.of(List.of(opened, waited))))))));
     }
     try (Remote framed = open.apply(true, Optional.empty())) {
-      lines.add("cbor+deflate " + on(framed, in -> Far.call(in, "t:add", Json.of(2), Json.of(3)))
-          + " " + on(framed, in -> all(host -> Far.program(in.up(), host, "t:pairs", List.of())))
-          + " " + on(framed, in -> sent(out -> Far.stream(in.up(), out, "t:numbers", ints(3), 1))));
+      lines.add("cbor+deflate " + on(framed, Far.call("t:add", Json.of(2), Json.of(3)))
+          + " " + on(framed, all(Far.program("t:pairs", List.of())))
+          + " " + on(framed, sent(Far.stream("t:numbers", ints(3), 1))));
     }
     try (Remote proven = open.apply(false, Optional.of("a secret of the demonstration"))) {
-      lines.add("auth " + on(proven, in -> Far.call(in, "t:add", Json.of(2), Json.of(3))));
+      lines.add("auth " + on(proven, Far.call("t:add", Json.of(2), Json.of(3))));
     }
     return lines;
   }

@@ -13,9 +13,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 import okay.effects.java.Comp;
-import okay.effects.java.Cons;
-import okay.effects.java.In;
-import okay.effects.java.Nil;
+import okay.effects.java.Eff;
+import okay.effects.java.Pure;
 import okay.effects.java.Op;
 import okay.effects.java.Step;
 import okay.effects.java.std.Async;
@@ -32,17 +31,15 @@ import okay.effects.java.std.Throws;
  *   Throws.Raise    the call's condition
  *
  * A program that waits is a continuation kept: no thread waits with it. No handler takes these effects off: the
- * worker runs a program a step at a time and answers what it asks. {@code R} is the functions' row, named here so
- * that it is written out once, in {@code serve}. */
-public final class Worker<R> {
-  /** EVIDENCE of the worker's effects in a function's row: what a function may ask. */
-  public record Row<R>(In<Foreign, R> host, In<Emit<Json>, R> out, In<Fed, R> fed, In<Async, R> async,
-      In<Throws<Condition>, R> fails) {}
+ * worker runs a program a step at a time and answers what it asks. */
+public final class Worker {
+  /** THE ROW of a function served: what it may ask, in this order — {@code Throws.raise(c)},
+   * {@code up(Foreign.call(..))}, {@code up(up(Emit.send(..)))}, and so on. Named, so that it is written out once. */
+  public interface Row extends Eff<Throws<Condition>, Eff<Foreign, Eff<Emit<Json>, Eff<Fed, Eff<Async, Pure>>>>> {}
 
-  /** A function served: a program, made from its arguments. Its method is generic in the row, so a function is
-   * given as a method reference, not as a lambda. */
+  /** A function served: a program, made from its arguments. */
   public interface Program {
-    <R> Comp<R, Json> apply(Row<R> in, List<Json> args);
+    Comp<Json, Row> apply(List<Json> args);
   }
 
   /** An object kept for the host: its methods and attributes, by name; none for a name it has not. */
@@ -58,9 +55,7 @@ public final class Worker<R> {
   /** the module served until the host closes the wire; with a {@code secret}, to a host that proves it has the
    * same */
   public static void serve(Module module, InputStream in, OutputStream out, Optional<String> secret) {
-    Row<Cons<Foreign, Cons<Emit<Json>, Cons<Fed, Cons<Async, Cons<Throws<Condition>, Nil>>>>>> row =
-        new Row<>(In.here(), up(In.here()), up(up(In.here())), up(up(up(In.here()))), up(up(up(up(In.here())))));
-    Worker<?> worker = new Worker<>(module, new Link(in, out), secret, row);
+    Worker worker = new Worker(module, new Link(in, out), secret);
     worker.hello();
     while (worker.served()) { }
   }
@@ -116,8 +111,7 @@ public final class Worker<R> {
   private final Module module;
   private final Link link;
   private final Optional<String> secret;
-  private final Row<R> row;
-  private final Map<Key, Function<Json, Comp<R, Json>>> kept = new HashMap<>();
+  private final Map<Key, Function<Json, Comp<Json, Row>>> kept = new HashMap<>();
   private long counter = 0;
   private final Map<Long, Held> held = new HashMap<>();
   private long refs = 0;
@@ -127,11 +121,10 @@ public final class Worker<R> {
   private boolean proven;
   private boolean closing = false;
 
-  private Worker(Module module, Link link, Optional<String> secret, Row<R> row) {
+  private Worker(Module module, Link link, Optional<String> secret) {
     this.module = module;
     this.link = link;
     this.secret = secret;
-    this.row = row;
     this.proven = secret.isEmpty();
   }
 
@@ -170,7 +163,7 @@ public final class Worker<R> {
         case "call" -> call(id, request);
         case "program" -> {
           Task task = new Task.Stepped(id, run(request));
-          advance(task, function(request.get("fn")).apply(row, arguments(request)));
+          advance(task, function(request.get("fn")).apply(arguments(request)));
         }
         case "continue" -> proceed(id, request);
         case "forget" -> {
@@ -305,12 +298,12 @@ public final class Worker<R> {
     boolean keep = request.get("held").equals(Json.of(true));
     Json fn = request.get("fn");
     if (request.get("stream") instanceof Json.Int(long stream)) {
-      open(id, stream, request, function(fn).apply(row, args));
+      open(id, stream, request, function(fn).apply(args));
     } else if (fn instanceof Json.Str(String name) && module.classes().containsKey(name)) {
       if (!keep) throw new Condition("TypeError", name + " makes an object: it crosses only held, as a ref");
       ok(id, hold(new Held.Made(module.classes().get(name).apply(args))));
     } else if (fn instanceof Json.Str) {
-      advance(new Task.Called(id, keep), function(fn).apply(row, args));
+      advance(new Task.Called(id, keep), function(fn).apply(args));
     } else if (fn.get("ref") instanceof Json.Int(long ref) && fn.get("method") instanceof Json.Str(String name)) {
       answer(id, keep, member(ref, name, thing -> thing.method(name, args)));
     } else if (fn.get("ref") instanceof Json.Int(long ref) && fn.get("attr") instanceof Json.Str(String name)) {
@@ -330,7 +323,7 @@ public final class Worker<R> {
   }
 
   /** a call as a stream: answered at once, its chunks follow as the host gives credit */
-  private void open(Json id, long stream, Json request, Comp<R, Json> p) {
+  private void open(Json id, long stream, Json request, Comp<Json, Row> p) {
     Input input = request.get("input").get("id") instanceof Json.Int(long fed) ? new Input(fed) : null;
     long credit = request.get("credit") instanceof Json.Int(long n) ? n : 1;
     Output out = new Output(stream, credit, input);
@@ -347,7 +340,7 @@ public final class Worker<R> {
     if (request.get("condition") != Json.NULL) {
       throw new Condition("ValueError", "a program as data is continued with an answer, not a condition");
     }
-    Function<Json, Comp<R, Json>> rest = kept.get(new Key(run, k));
+    Function<Json, Comp<Json, Row>> rest = kept.get(new Key(run, k));
     if (rest == null) throw new Condition("LookupError", "no continuation " + k + " of run " + run);
     advance(new Task.Stepped(id, run), rest.apply(resolved(Escapes.dec(request.get("answer")))));
   }
@@ -385,8 +378,8 @@ public final class Worker<R> {
   // ---- a function, run
 
   /** the task's program run until it ends or waits: for the host's answer, a credit, a value, a callback */
-  private void advance(Task task, Comp<R, Json> start) {
-    Comp<R, Json> next = start;
+  private void advance(Task task, Comp<Json, Row> start) {
+    Comp<Json, Row> next = start;
     while (next != null) {
       try {
         next = turn(task, step(next));
@@ -399,10 +392,10 @@ public final class Worker<R> {
 
   /** where the program came to: what goes to the host, and the rest of the program — null when it has ended or
    * must wait */
-  private Comp<R, Json> turn(Task task, Step<R, Json> at) {
+  private Comp<Json, Row> turn(Task task, Step<Json, Row> at) {
     if (task instanceof Task.Streamed(Output out) && !out.open) return null;
     switch (at) {
-      case Step.Done<R, Json>(Json value) -> {
+      case Step.Done<Json, Row>(Json value) -> {
         switch (task) {
           case Task.Called(Json id, boolean keep) -> answer(id, keep, value);
           case Task.Stepped(Json id, long run) -> ok(id, Json.obj("done", Escapes.enc(value)));
@@ -413,11 +406,11 @@ public final class Worker<R> {
         }
         return null;
       }
-      case Step.Asked<R, ?, Json> asked -> { return asked(task, asked); }
+      case Step.Asked<?, Json, Row> asked -> { return asked(task, asked); }
     }
   }
 
-  private Comp<R, Json> asked(Task task, Step.Asked<R, ?, Json> asked) {
+  private Comp<Json, Row> asked(Task task, Step.Asked<?, Json, Row> asked) {
     switch (asked.op()) {
       case Throws.Raise<?, ?>(Condition c) -> fail(task, c);
       case Foreign.Call call when task instanceof Task.Stepped(Json id, long run) -> {
@@ -431,7 +424,7 @@ public final class Worker<R> {
           link.send(Json.obj("stream", Json.of(out.id), "chunk", Escapes.enc(value)));
           return resume(asked, send, null);
         }
-        out.waiting = () -> advance(task, Emit.send(row.out(), value).flatMap(sent -> resume(asked, send, sent)));
+        out.waiting = () -> advance(task, up(up(Emit.send(value))).flatMap(sent -> resume(asked, send, sent)));
       }
       case Fed.Next next when task instanceof Task.Streamed(Output out) && out.input != null -> {
         Input in = out.input;
@@ -441,7 +434,7 @@ public final class Worker<R> {
           return resume(asked, next, Optional.of(in.values.remove()));
         }
         if (in.ended) return resume(asked, next, Optional.empty());
-        in.waiting = () -> advance(task, Fed.next(row.fed()).flatMap(value -> resume(asked, next, value)));
+        in.waiting = () -> advance(task, up(up(up(Fed.next()))).flatMap(value -> resume(asked, next, value)));
       }
       // a function that takes from an input the call does not have finds its end at once
       case Fed.Next next -> { return resume(asked, next, Optional.empty()); }
@@ -452,15 +445,15 @@ public final class Worker<R> {
   }
 
   /** the rest of the program, given the answer of the operation it asked */
-  private static <R, X> Comp<R, Json> resume(Step.Asked<R, ?, Json> asked, Op<?, X> op, X answer) {
+  private static <X> Comp<Json, Row> resume(Step.Asked<?, Json, Row> asked, Op<?, X> op, X answer) {
     if (op != asked.op()) throw new IllegalArgumentException("not the operation asked: " + op);
     @SuppressWarnings("unchecked") // the operation is the witness: the rest takes the answer of the operation asked
-    Function<X, Comp<R, Json>> rest = (Function<X, Comp<R, Json>>) asked.k();
+    Function<X, Comp<Json, Row>> rest = (Function<X, Comp<Json, Row>>) asked.k();
     return rest.apply(answer);
   }
 
   /** the program goes on when the callback comes, on whatever thread */
-  private <X> void awaited(Task task, Step.Asked<R, ?, Json> asked, Async.Await<X> await) {
+  private <X> void awaited(Task task, Step.Asked<?, Json, Row> asked, Async.Await<X> await) {
     await.register().accept(x -> {
       synchronized (this) { advance(task, resume(asked, await, x)); }
     });

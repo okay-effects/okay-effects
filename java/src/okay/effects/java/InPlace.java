@@ -4,7 +4,7 @@ package okay.effects.java;
  * the program goes on. The state belongs to the path: a continuation resumed twice starts twice from the state it
  * was taken with. */
 public interface InPlace<F, S, A, B, R> {
-  Comp<R, B> ret(S state, A a);
+  Comp<B, R> ret(S state, A a);
 
   /** the answer, given to the cell with the operation as the witness of its type:
    * {@code case Get<S> get -> state.answer(get, state.value)} */

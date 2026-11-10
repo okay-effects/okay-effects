@@ -16,12 +16,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import okay.effects.java.Body;
 import okay.effects.java.Cell;
 import okay.effects.java.Comp;
+import okay.effects.java.Eff;
 import okay.effects.java.Effects;
 import okay.effects.java.InPlace;
-import okay.effects.java.Nil;
+import okay.effects.java.Pure;
 import okay.effects.java.std.Throws;
 
 /** THE HOST'S END of a wire to a far side. Opening it is the handshake: the far side's hello, the proof of the
@@ -241,10 +241,10 @@ public final class Remote implements AutoCloseable {
 
   /** THE PROGRAM RUN to its value, its far operations done on this wire. When it ends, what it left open on the far
    * side is closed: its runs forgotten, its streams cancelled. Refs live on, until released. */
-  public <A> A run(Body<Far, Nil, A> body) {
+  public <A> A run(Comp<A, ? super Eff<Far, Pure>> p) {
     try {
-      return Effects.run(handle(Far.class, new InPlace<Far, Void, A, A, Nil>() {
-        public Comp<Nil, A> ret(Void state, A a) { return pure(a); }
+      return Effects.run(handle(Far.class, new InPlace<Far, Void, A, A, Pure>() {
+        public Comp<A, Pure> ret(Void state, A a) { return pure(a); }
         public Cell.Answered answer(Cell<Void> state, Far op) {
           return switch (op) {
             case Far.Send send -> {
@@ -261,7 +261,7 @@ public final class Remote implements AutoCloseable {
             case Far.Pull pull -> state.answer(pull, pull(pull.stream()));
           };
         }
-      }, null, body));
+      }, null, p));
     } finally {
       streams.keySet().forEach(stream -> send("cancel", Json.obj("stream", Json.of(stream))));
       runs.forEach(run -> send("forget", Json.obj("run", Json.of(run))));

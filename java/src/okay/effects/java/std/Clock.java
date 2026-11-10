@@ -3,10 +3,9 @@ package okay.effects.java.std;
 import static okay.effects.java.Effects.*;
 
 import java.util.function.LongSupplier;
-import okay.effects.java.Body;
 import okay.effects.java.Cell;
 import okay.effects.java.Comp;
-import okay.effects.java.In;
+import okay.effects.java.Eff;
 import okay.effects.java.InPlace;
 import okay.effects.java.Op;
 
@@ -14,18 +13,18 @@ import okay.effects.java.Op;
 public sealed interface Clock {
   record Now() implements Clock, Op<Clock, Long> {}
 
-  static <R> Comp<R, Long> now(In<Clock, R> in) { return perform(in, new Now()); }
+  static Comp<Long, Eff<Clock, ?>> now() { return perform(new Now()); }
 
-  static <R, A> Comp<R, A> system(Body<Clock, R, A> body) { return at(System::currentTimeMillis, body); }
+  static <A, R> Comp<A, R> system(Comp<A, ? super Eff<Clock, R>> p) { return at(System::currentTimeMillis, p); }
 
-  static <R, A> Comp<R, A> at(LongSupplier time, Body<Clock, R, A> body) {
+  static <A, R> Comp<A, R> at(LongSupplier time, Comp<A, ? super Eff<Clock, R>> p) {
     return handle(Clock.class, new InPlace<Clock, Void, A, A, R>() {
-      public Comp<R, A> ret(Void state, A a) { return pure(a); }
+      public Comp<A, R> ret(Void state, A a) { return pure(a); }
       public Cell.Answered answer(Cell<Void> state, Clock op) {
         return switch (op) {
           case Now now -> state.answer(now, time.getAsLong());
         };
       }
-    }, null, body);
+    }, null, p);
   }
 }

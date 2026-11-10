@@ -51,73 +51,62 @@ final class Properties {
     return values;
   }
 
-  // The programs: each polymorphic in its row, and given the evidence of the effects it asks.
+  // The programs: the type of each is the row of the effects it asks, in the order of the handlers it is run under.
 
-  static <R> Comp<R, Integer> count(In<State<Integer>, R> st, int n) {
-    if (n == 0) return State.get(st);
-    return State.get(st).flatMap(s -> State.put(st, s + 1)).then(() -> count(st, n - 1));
+  static Comp<Integer, Eff<State<Integer>, ?>> count(int n) {
+    if (n == 0) return State.get();
+    return State.<Integer>get().flatMap(s -> State.put(s + 1)).then(() -> count(n - 1));
   }
 
-  static <R> Comp<R, Integer> logged(In<State<Integer>, R> st, In<Writer<String>, R> wr, In<Throws<String>, R> th) {
-    return State.get(st).flatMap(s ->
-        Writer.tell(wr, "was " + s)
-            .then(() -> State.put(st, s + 1))
-            .then(() -> s > 100 ? Throws.<String, R, Void>raise(th, "too big") : pure(null))
-            .map(done -> s * 2));
+  static Comp<Integer, Eff<State<Integer>, Eff<Writer<String>, Eff<Throws<String>, ?>>>> logged() {
+    return State.<Integer>get().flatMap(s ->
+        up(Writer.tell("was " + s)).flatMap(told ->
+            State.put(s + 1).flatMap(put -> s > 100 ? up(up(Throws.raise("too big"))) : pure(s * 2))));
   }
 
-  static <R> Comp<R, Void> failing(In<State<Integer>, R> st, In<Throws<String>, R> th) {
-    return State.put(st, 5).then(() -> Throws.raise(th, "no"));
-  }
-
-  static <R> Comp<R, Integer> nested(In<State<Integer>, R> st, int binds) {
-    Comp<R, Integer> p = State.get(st);
-    for (int i = 0; i < binds; i++) p = p.flatMap(s -> State.put(st, s + 1).map(done -> s + 1));
+  static Comp<Integer, Eff<State<Integer>, ?>> nested(int binds) {
+    Comp<Integer, Eff<State<Integer>, ?>> p = State.get();
+    for (int i = 0; i < binds; i++) p = p.flatMap(s -> State.put(s + 1).map(done -> s + 1));
     return p;
   }
 
-  static <R> Comp<R, Boolean> even(int n) { return n == 0 ? pure(true) : defer(() -> odd(n - 1)); }
-  static <R> Comp<R, Boolean> odd(int n) { return n == 0 ? pure(false) : defer(() -> even(n - 1)); }
+  static <R> Comp<Boolean, R> even(int n) { return n == 0 ? pure(true) : defer(() -> odd(n - 1)); }
+  static <R> Comp<Boolean, R> odd(int n) { return n == 0 ? pure(false) : defer(() -> even(n - 1)); }
 
-  static <R> Comp<R, Integer> chosen(In<State<Integer>, R> st, In<Choose, R> ch) {
-    return Choose.among(ch, List.of(1, 2)).flatMap(x ->
-        State.get(st).flatMap(s -> State.put(st, s + x).map(done -> s + x)));
+  static Comp<Integer, Eff<State<Integer>, ?>> add(int x) {
+    return State.<Integer>get().flatMap(s -> State.put(s + x).map(done -> s + x));
   }
 
-  static <R> Comp<R, Integer> oddOnly(In<Choose, R> ch) {
-    return Choose.among(ch, List.of(2, 4, 5, 7)).flatMap(x -> x % 2 == 0 ? Choose.none(ch) : pure(x));
+  static Comp<Integer, Eff<Choose, ?>> oddOnly() {
+    return Choose.among(List.of(2, 4, 5, 7)).flatMap(x -> x % 2 == 0 ? Choose.none() : pure(x));
   }
 
-  static <R> Comp<R, Void> from(In<Emit<Integer>, R> em, int n) {
-    return Emit.send(em, n).then(() -> from(em, n + 1));
+  static Comp<Void, Eff<Emit<Integer>, ?>> from(int n) { return Emit.send(n).then(() -> from(n + 1)); }
+
+  static Comp<Void, Eff<Emit<Integer>, ?>> three() { return Emit.sendAll(List.of(1, 2, 3)); }
+
+  static Comp<Integer, Eff<Async, ?>> later(ArrayDeque<Runnable> waiting, int n) {
+    return Async.await(resume -> waiting.push(() -> resume.accept(n)));
   }
 
-  static <R> Comp<R, Void> three(In<Emit<Integer>, R> em) { return Emit.sendAll(em, List.of(1, 2, 3)); }
+  static Comp<Integer, Eff<Async, ?>> after(long millis, int n) { return Async.sleep(millis).map(done -> n); }
 
-  static <R> Comp<R, Integer> later(In<Async, R> as, ArrayDeque<Runnable> waiting, int n) {
-    return Async.await(as, resume -> waiting.push(() -> resume.accept(n)));
-  }
-
-  static <R> Comp<R, Integer> after(In<Async, R> as, long millis, int n) {
-    return Async.sleep(as, millis).map(done -> n);
-  }
-
-  static <R> Comp<R, Integer> answered(In<Async, R> as, int n, int sum) {
+  static Comp<Integer, Eff<Async, ?>> answered(int n, int sum) {
     if (n == 0) return pure(sum);
-    return Async.<R, Integer>await(as, resume -> resume.accept(1)).flatMap(x -> answered(as, n - 1, sum + x));
+    return Async.<Integer>await(resume -> resume.accept(1)).flatMap(x -> answered(n - 1, sum + x));
   }
 
   /** an interceptor: every operation on the state seen, a put of more than 2 changed, and all asked again */
-  static <R, A> Comp<R, A> audit(In<State<Integer>, R> st, List<String> seen, Comp<R, A> p) {
-    return intercept(State.class, st, new Handler<State<Integer>, A, A, R>() {
-      public Comp<R, A> ret(A a) { return pure(a); }
-      public Comp<R, A> on(State<Integer> op, K<R, A> k) {
+  static <A, R extends Eff<State<Integer>, ?>> Comp<A, R> audit(List<String> seen, Comp<A, ? super R> p) {
+    return intercept(State.class, new Handler<State<Integer>, A, A, R>() {
+      public Comp<A, R> ret(A a) { return pure(a); }
+      public Comp<A, R> on(State<Integer> op, K<A, R> k) {
         seen.add(op.toString());
         return switch (op) {
           case State.Put<Integer> put when put.value() > 2 ->
-              perform(st, new State.Put<>(2)).flatMap(done -> k.resume(put, done));
-          case State.Put<Integer> put -> perform(st, put).flatMap(done -> k.resume(put, done));
-          case State.Get<Integer> get -> perform(st, get).flatMap(s -> k.resume(get, s));
+              perform(new State.Put<>(2)).flatMap(done -> k.resume(put, done));
+          case State.Put<Integer> put -> perform(put).flatMap(done -> k.resume(put, done));
+          case State.Get<Integer> get -> perform(get).flatMap(s -> k.resume(get, s));
         };
       }
     }, p);
@@ -126,60 +115,60 @@ final class Properties {
   sealed interface Account {}
   record Deposit(int amount) implements Account, Op<Account, Integer> {}
 
-  /** an account kept in a state: the handler of one effect asks the operations of another */
-  static <R, A> Comp<R, A> onState(In<State<Integer>, R> st, Body<Account, R, A> body) {
+  /** an account kept in a state: the handler of one effect asks the operations of another, the next in the row */
+  static <A, R extends Eff<State<Integer>, ?>> Comp<A, R> onState(Comp<A, ? super Eff<Account, R>> p) {
     return handle(Account.class, new Handler<Account, A, A, R>() {
-      public Comp<R, A> ret(A a) { return pure(a); }
-      public Comp<R, A> on(Account op, K<R, A> k) {
+      public Comp<A, R> ret(A a) { return pure(a); }
+      public Comp<A, R> on(Account op, K<A, R> k) {
         return switch (op) {
-          case Deposit deposit -> State.get(st).flatMap(s ->
-              State.put(st, s + deposit.amount()).then(() -> k.resume(deposit, s + deposit.amount())));
+          case Deposit deposit -> State.<Integer>get().flatMap(s ->
+              State.put(s + deposit.amount()).then(() -> k.resume(deposit, s + deposit.amount())));
         };
       }
-    }, body);
+    }, p);
   }
 
   /** the lie the compiler does not let a program tell: a row without an effect that is asked */
   @SuppressWarnings("unchecked") // on purpose: the only way to an operation with no handler
-  static <A> Comp<Nil, A> closed(Comp<?, A> open) { return (Comp<Nil, A>) open; }
+  static <A> Comp<A, Pure> closed(Comp<A, ?> open) { return (Comp<A, Pure>) open; }
 
   public static void main(String[] args) {
     test("a row: handlers take their effects one by one, a program runs when none is left", () -> {
-      var got = run(Throws.run(String.class, th ->
-          Writer.run(String.class, wr -> State.run(1, st -> logged(st, wr.up(), up(up(th)))))));
+      var got = run(Throws.run(Writer.run(State.run(1, logged()))));
       same(got, new Throws.Ok<>(new Writer.Logged<>(List.of("was 1"), new State.Final<>(2, 2))));
     });
 
     test("the order of handlers is the meaning: state kept or lost at a failure", () -> {
-      same(run(State.run(0, st -> Throws.run(String.class, th -> failing(st.up(), th)))),
+      same(run(State.run(0, Throws.run(up(State.put(5)).flatMap(put -> Throws.raise("no"))))),
           new State.Final<>(5, new Throws.Err<>("no")));
-      same(run(Throws.run(String.class, th -> State.run(0, st -> failing(st, th.up())))), new Throws.Err<>("no"));
+      same(run(Throws.run(State.run(0, State.put(5).flatMap(put -> up(Throws.raise("no")))))), new Throws.Err<>("no"));
     });
 
     test("constant stack: a million operations", () ->
-        same(run(State.run(0, st -> count(st, 1_000_000))), new State.Final<>(1_000_000, 1_000_000)));
+        same(run(State.run(0, count(1_000_000))), new State.Final<>(1_000_000, 1_000_000)));
 
     test("constant stack: a hundred thousand binds nested to the left", () ->
-        same(run(State.run(0, st -> nested(st, 100_000))), new State.Final<>(100_000, 100_000)));
+        same(run(State.run(0, nested(100_000))), new State.Final<>(100_000, 100_000)));
 
     test("mutual tail recursion without end: a million calls", () -> same(run(even(1_000_000)), true));
 
     test("a continuation taken many times: every path of a choice", () -> {
-      List<Pair<Integer, Integer>> pairs = run(Choose.all(ch -> Choose.among(ch, List.of(1, 2, 3)).flatMap(x ->
-          Choose.among(ch, List.of(10, 20)).map(y -> new Pair<>(x, y)))));
+      List<Pair<Integer, Integer>> pairs = run(Choose.all(Choose.among(List.of(1, 2, 3)).flatMap(x ->
+          Choose.among(List.of(10, 20)).map(y -> new Pair<>(x, y)))));
       same(pairs, List.of(new Pair<>(1, 10), new Pair<>(1, 20), new Pair<>(2, 10), new Pair<>(2, 20),
           new Pair<>(3, 10), new Pair<>(3, 20)));
     });
 
     test("many times, with state: each path its own state, or one state through all", () -> {
-      same(run(Choose.all(ch -> State.run(0, st -> chosen(st, ch.up())))),
+      same(run(Choose.all(State.run(0, up(Choose.among(List.of(1, 2))).flatMap(x -> add(x))))),
           List.of(new State.Final<>(1, 1), new State.Final<>(2, 2)));
-      same(run(State.run(0, st -> Choose.all(ch -> chosen(st.up(), ch)))), new State.Final<>(3, List.of(1, 3)));
+      same(run(State.run(0, Choose.all(Choose.among(List.of(1, 2)).flatMap(x -> up(add(x)))))),
+          new State.Final<>(3, List.of(1, 3)));
     });
 
     test("an endless stream, pulled", () -> {
-      same(first(3, Emit.pull(Integer.class, em -> from(em, 0))), List.of(0, 1, 2));
-      Iterator<Integer> stream = Emit.pull(em -> from(em, 0));
+      same(first(3, Emit.pull(from(0))), List.of(0, 1, 2));
+      Iterator<Integer> stream = Emit.pull(from(0));
       for (int i = 0; i < 1_000_000; i++) stream.next();
       same(stream.next(), 1_000_000);
     });
@@ -187,7 +176,7 @@ final class Properties {
     test("asynchrony: the handler returns, the answer resumes the program later", () -> {
       ArrayDeque<Runnable> waiting = new ArrayDeque<>();
       List<Integer> result = new ArrayList<>();
-      Async.start(as -> later(as, waiting, 1).flatMap(a -> later(as, waiting, 2).map(b -> a + b)), result::add);
+      Async.start(later(waiting, 1).flatMap(a -> later(waiting, 2).map(b -> a + b)), result::add);
       same(result, List.of());
       while (!waiting.isEmpty()) waiting.pop().run();
       same(result, List.of(3));
@@ -195,60 +184,52 @@ final class Properties {
 
     test("interception and audit: an operation seen, changed, and asked again", () -> {
       List<String> seen = new ArrayList<>();
-      same(run(State.run(0, st -> audit(st, seen, count(st, 5)))), new State.Final<>(2, 2));
+      same(run(State.run(0, audit(seen, count(5)))), new State.Final<>(2, 2));
       same(seen.stream().filter(s -> s.startsWith("Put")).count(), 5L);
     });
 
     test("delegation: an effect answered by the operations of another", () -> {
-      var got = run(State.run(100, st ->
-          onState(st, acc -> perform(acc, new Deposit(10)).then(() -> perform(acc, new Deposit(5))))));
+      var got = run(State.run(100, onState(perform(new Deposit(10)).then(() -> perform(new Deposit(5))))));
       same(got, new State.Final<>(115, 115));
     });
 
     test("reader: a value of the surroundings, and changed for a part of the program", () ->
-        same(run(Reader.run(2, rd -> Reader.ask(rd).flatMap(a ->
-            Reader.local(rd, v -> v * 10, Reader.ask(rd)).map(b -> new Pair<>(a, b))))), new Pair<>(2, 20)));
+        same(run(Reader.run(2, Reader.<Integer>ask().flatMap(a ->
+            Reader.local(v -> v * 10, Reader.<Integer>ask()).map(b -> new Pair<>(a, b))))), new Pair<>(2, 20)));
 
     test("a failure recovered; the first of the choices; fresh numbers; a clock that a test sets", () -> {
-      same(run(Throws.recover((String e) -> pure(e.length()), th -> Throws.raise(th, "no"))), 2);
-      same(run(Choose.first(ch -> oddOnly(ch))), Optional.of(5));
-      same(run(Choose.all(ch -> oddOnly(ch))), List.of(5, 7));
-      same(run(Fresh.run(fr -> Fresh.fresh(fr).flatMap(a -> Fresh.fresh(fr).map(b -> new Pair<>(a, b))))),
-          new Pair<>(0L, 1L));
-      same(run(Clock.at(() -> 42L, cl -> Clock.now(cl))), 42L);
+      same(run(Throws.recover(e -> pure(e.length()), Throws.raise("no"))), 2);
+      same(run(Choose.first(oddOnly())), Optional.of(5));
+      same(run(Choose.all(oddOnly())), List.of(5, 7));
+      same(run(Fresh.run(Fresh.fresh().flatMap(a -> Fresh.fresh().map(b -> new Pair<>(a, b))))), new Pair<>(0L, 1L));
+      same(run(Clock.at(() -> 42L, Clock.now())), 42L);
     });
 
     test("streams: collected, looped over, mapped, filtered, cut short, zipped, merged", () -> {
-      same(run(Emit.collect(Integer.class, em -> three(em))), new Emit.Sent<>(List.of(1, 2, 3), null));
-      same(run(State.run(0, st ->
-          Emit.each((Integer x) -> State.modify(st, s -> s + x), em -> three(em)))).state(), 6);
+      same(run(Emit.collect(three())), new Emit.Sent<>(List.of(1, 2, 3), null));
+      same(run(State.run(0, Emit.each(x -> State.modify(s -> s + x), three()))).state(), 6);
       // from the inside out: the endless stream, its even values, each doubled, the first three
-      var evens = run(Emit.collect(Integer.class, out ->
-          Emit.take(out, 3, cut ->
-              Emit.map(cut, (Integer x) -> x * 2, doubled ->
-                  Emit.filter(doubled, x -> x % 2 == 0, all -> from(all, 0))))));
+      var evens = run(Emit.collect(Emit.take(3, Emit.map(x -> x * 2, Emit.filter(x -> x % 2 == 0, from(0))))));
       same(evens.values(), List.of(0, 4, 8));
-      Iterator<Pair<Integer, Integer>> zipped = Emit.pull(em -> Emit.zip(em, a -> from(a, 0), b -> three(b)));
+      Iterator<Pair<Integer, Integer>> zipped = Emit.pull(Emit.zip(from(0), three()));
       same(first(9, zipped), List.of(new Pair<>(0, 1), new Pair<>(1, 2), new Pair<>(2, 3)));
-      same(first(5, Emit.pull(Integer.class, em -> Emit.merge(em, a -> three(a), b -> from(b, 10)))),
-          List.of(1, 10, 2, 11, 3));
+      same(first(5, Emit.pull(Emit.merge(three(), from(10)))), List.of(1, 10, 2, 11, 3));
     });
 
     test("asynchrony: both at once, the first of two, all, a sleep, a future", () -> {
-      same(Async.runBlocking(as -> Async.both(as, a -> after(a, 30, 1), b -> after(b, 10, 2))), new Pair<>(1, 2));
-      same(Async.runBlocking(as -> Async.race(as, a -> after(a, 200, 1), b -> after(b, 10, 2))), 2);
-      List<Body<Async, Nil, Integer>> three = List.of(a -> after(a, 20, 1), b -> after(b, 10, 2), c -> after(c, 1, 3));
-      same(Async.runBlocking(as -> Async.all(as, three)), List.of(1, 2, 3));
-      same(Async.toFuture(as -> after(as, 5, 7).map(x -> x + 1)).get(5, TimeUnit.SECONDS), 8);
+      same(Async.runBlocking(Async.both(after(30, 1), after(10, 2))), new Pair<>(1, 2));
+      same(Async.runBlocking(Async.race(after(200, 1), after(10, 2))), 2);
+      same(Async.runBlocking(Async.all(List.of(after(20, 1), after(10, 2), after(1, 3)))), List.of(1, 2, 3));
+      same(Async.toFuture(after(5, 7).map(x -> x + 1)).get(5, TimeUnit.SECONDS), 8);
       CompletableFuture<Integer> late = CompletableFuture.supplyAsync(() -> 4);
-      same(Async.runBlocking(as -> Async.fromFuture(as, () -> late)), new Throws.Ok<>(4));
+      same(Async.runBlocking(Async.fromFuture(() -> late)), new Throws.Ok<>(4));
     });
 
     test("asynchrony: a million answers given at once take no stack", () ->
-        same(Async.runBlocking(as -> answered(as, 1_000_000, 0)), 1_000_000));
+        same(Async.runBlocking(answered(1_000_000, 0)), 1_000_000));
 
     test("no handler: an operation that reached the top is refused by name", () -> {
-      Comp<Cons<State<Integer>, Nil>, Integer> open = State.get(In.here());
+      Comp<Integer, Eff<State<Integer>, ?>> open = State.get();
       try {
         run(closed(open));
         throw new AssertionError("ran");

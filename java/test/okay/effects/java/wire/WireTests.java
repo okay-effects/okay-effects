@@ -102,11 +102,11 @@ final class WireTests {
     return result instanceof Throws.Err<Condition, A>(Condition c) ? c.kind : "no failure: " + result;
   }
 
-  static <R> Comp<R, Json> slow(Worker.Row<R> in, List<Json> args) {
-    return Async.sleep(in.async(), 100).map(done -> Json.of("slow"));
+  static Comp<Json, Worker.Row> slow(List<Json> args) {
+    return up(up(up(up(Async.sleep(100))))).map(done -> Json.of("slow"));
   }
 
-  static <R> Comp<R, Json> fast(Worker.Row<R> in, List<Json> args) { return pure(Json.of("fast")); }
+  static Comp<Json, Worker.Row> fast(List<Json> args) { return pure(Json.of("fast")); }
 
   public static void main(String[] args) {
     // ---- the codecs
@@ -278,9 +278,9 @@ final class WireTests {
       for (boolean cbor : List.of(false, true)) {
         for (boolean deflate : List.of(false, true)) {
           try (Remote remote = far(Demo.module(), cbor, deflate, Optional.empty(), Optional.empty())) {
-            same(Demo.attempt(remote, in -> Far.call(in, "t:echo", ODD)), new Throws.Ok<>(ODD));
+            same(Demo.attempt(remote, Far.call("t:echo", ODD)), new Throws.Ok<>(ODD));
             Json big = Json.of("x".repeat(100000));
-            same(Demo.attempt(remote, in -> Far.call(in, "t:echo", big)), new Throws.Ok<>(big));
+            same(Demo.attempt(remote, Far.call("t:echo", big)), new Throws.Ok<>(big));
           }
         }
       }
@@ -288,53 +288,49 @@ final class WireTests {
 
     test("a far failure is raised here, and a handler of this side decides", () -> {
       try (Remote remote = far()) {
-        Json rescued = remote.run(fr -> Throws.recover((Condition c) -> pure(Json.of(c.kind)),
-            th -> Far.call(new Far.Failing<>(fr.up(), th), "t:boom")));
+        Json rescued = remote.run(Throws.recover(c -> pure(Json.of(c.kind)), Far.call("t:boom")));
         same(rescued, Json.of("ValueError"));
-        same(kind(Demo.attempt(remote, in -> Far.call(in, "t:nothing"))), "LookupError");
+        same(kind(Demo.attempt(remote, Far.call("t:nothing"))), "LookupError");
         // the far side lives on
-        same(Demo.attempt(remote, in -> Far.call(in, "t:add", Json.of(2), Json.of(3))), new Throws.Ok<>(Json.of(5)));
+        same(Demo.attempt(remote, Far.call("t:add", Json.of(2), Json.of(3))), new Throws.Ok<>(Json.of(5)));
       }
     });
 
     test("mux: an answer that comes later, on another thread, does not hold the next", () -> {
       Worker.Module module = new Worker.Module(Map.of("slow", WireTests::slow, "fast", WireTests::fast), Map.of());
       try (Remote remote = far(module, false, false, Optional.empty(), Optional.empty())) {
-        same(Demo.on(remote, in -> Far.start(in.far(), "slow").flatMap(slow ->
-            Far.start(in.far(), "fast").flatMap(fast ->
-                Far.result(in, fast).flatMap(first ->
-                    Far.result(in, slow).map(second -> arr(first, second)))))), "[\"fast\",\"slow\"]");
+        same(Demo.on(remote, up(Far.start("slow")).flatMap(slow ->
+            up(Far.start("fast")).flatMap(fast ->
+                Far.result(fast).flatMap(first ->
+                    Far.result(slow).map(second -> arr(first, second)))))), "[\"fast\",\"slow\"]");
       }
     });
 
     test("a stream: the far side is never more than the credit ahead; a long one in constant stack", () -> {
       try (Remote remote = far()) {
         for (int credit : List.of(1, 3, 10)) {
-          same(Demo.on(remote, in -> Demo.sent(out -> Emit.take(out, 4, cut ->
-              Far.stream(in.<Emit<Json>>up().up(), cut, "t:numbers", Demo.ints(1000), credit)))), "[1,2,3,4]");
-          same(Demo.on(remote, in -> Far.call(in, "t:sent")), String.valueOf(4 + credit));
+          same(Demo.on(remote, Demo.sent(Emit.take(4, under(Far.stream("t:numbers", Demo.ints(1000), credit))))),
+              "[1,2,3,4]");
+          same(Demo.on(remote, Far.call("t:sent")), String.valueOf(4 + credit));
         }
-        Json all = remote.run(fr -> Throws.recover((Condition c) -> pure(Json.of(c.kind)), th ->
-            Demo.sent(out -> Far.stream(new Far.Failing<>(up(up(fr)), th.up()), out, "t:numbers",
-                Demo.ints(50000), 64))));
+        Json all = remote.run(Throws.recover(c -> pure(Json.of(c.kind)),
+            Demo.sent(Far.stream("t:numbers", Demo.ints(50000), 64))));
         same(Escapes.items(all).size(), 50000);
         Iterable<Json> many = () -> IntStream.range(0, 20000).mapToObj(i -> Json.of(i % 1000)).iterator();
-        same(Demo.attempt(remote, in -> Demo.sent(out ->
-                Far.stream(in.up(), out, "t:dedup", List.of(), 2, fed -> Emit.sendAll(fed, many)))),
+        same(Demo.attempt(remote, Demo.sent(Far.stream("t:dedup", List.of(), 2, Emit.sendAll(many)))),
             new Throws.Ok<>(Json.of(IntStream.range(0, 1000).mapToObj(i -> Json.of(i)).toList())));
       }
     });
 
     test("a stream that fails ends with its condition; a far side with no mux has no streams", () -> {
       try (Remote remote = far()) {
-        same(Demo.on(remote, in -> Demo.sent(out -> Far.stream(in.up(), out, "t:boom", List.of(), 1))),
+        same(Demo.on(remote, Demo.sent(Far.stream("t:boom", List.of(), 1))),
             "ValueError: no");
       }
       try (Remote old = heard("{\"shim\":9,\"speaks\":{\"format\":[\"json\"]}}", false)) {
-        same(kind(Demo.attempt(old, in -> Demo.sent(out ->
-            Far.stream(in.up(), out, "t:numbers", Demo.ints(1), 1)))), "NotStreaming");
+        same(kind(Demo.attempt(old, Demo.sent(Far.stream("t:numbers", Demo.ints(1), 1)))), "NotStreaming");
         // and when the far side is gone, that is a failure too
-        same(kind(Demo.attempt(old, in -> Far.call(in, "t:add"))), "WorkerDied");
+        same(kind(Demo.attempt(old, Far.call("t:add"))), "WorkerDied");
       }
     });
 
@@ -342,7 +338,7 @@ final class WireTests {
       Optional<String> s = Optional.of("s");
       Optional<String> none = Optional.empty();
       try (Remote proven = far(Demo.module(), false, false, s, s)) {
-        same(Demo.on(proven, in -> Far.call(in, "t:add", Json.of(2), Json.of(3))), "5");
+        same(Demo.on(proven, Far.call("t:add", Json.of(2), Json.of(3))), "5");
       }
       same(refused(Condition.class, () -> far(Demo.module(), false, false, s, Optional.of("another"))).kind,
           "PermissionError");

@@ -59,20 +59,22 @@ final class Tck {
   sealed interface Fail {}
   record RaiseOp(int e, int n) implements Fail, Op<Fail, Integer> {}
 
-  /** The four effects stay in the row of every program, whatever handlers it is under: the evidence of them. */
-  record Row<R>(In<Log, R> log, In<Store, R> store, In<Fail, R> fail, In<Choose, R> choose) {}
+  /** THE ROW of every program: the four effects stay in it whatever handlers the program is under — a handler
+   * here answers its own operations and lets the others pass. Named, so that it is written out
+   * once; the empty row by its full name, for `Pure` is here a term of the TCK. */
+  interface Row extends Eff<Log, Eff<Store, Eff<Fail, Eff<Choose, okay.effects.java.Pure>>>> {}
 
   record Summed(int sum, int value) {}
 
-  static <R> Comp<R, Integer> writer(Row<R> in, int e, Comp<R, Integer> p) {
-    return intercept(Log.class, in.log(), new Handler<Log, Integer, Summed, R>() {
+  static Comp<Integer, Row> writer(int e, Comp<Integer, Row> p) {
+    return intercept(Log.class, new Handler<Log, Integer, Summed, Row>() {
       public boolean mine(Log op) {
         return switch (op) {
           case TellOp tell -> tell.e() == e;
         };
       }
-      public Comp<R, Summed> ret(Integer a) { return pure(new Summed(0, a)); }
-      public Comp<R, Summed> on(Log op, K<R, Summed> k) {
+      public Comp<Summed, Row> ret(Integer a) { return pure(new Summed(0, a)); }
+      public Comp<Summed, Row> on(Log op, K<Summed, Row> k) {
         return switch (op) {
           case TellOp tell -> k.resume(tell, null).map(l -> new Summed(l.sum() + tell.n(), l.value()));
         };
@@ -82,16 +84,16 @@ final class Tck {
 
   /** the TCK's state is a cell made where the handler is installed: one for every resumption taken past it —
    * not the state of {@code std.State}, which each path has its own */
-  static <R> Comp<R, Integer> state(Row<R> in, int e, int s0, Comp<R, Integer> p) {
+  static Comp<Integer, Row> state(int e, int s0, Comp<Integer, Row> p) {
     int[] s = {s0};
-    return intercept(Store.class, in.store(), new InPlace<Store, Void, Integer, Integer, R>() {
+    return intercept(Store.class, new InPlace<Store, Void, Integer, Integer, Row>() {
       public boolean mine(Store op) {
         return switch (op) {
           case GetOp get -> get.e() == e;
           case PutOp put -> put.e() == e;
         };
       }
-      public Comp<R, Integer> ret(Void state, Integer a) { return pure(a * 10 + s[0]); }
+      public Comp<Integer, Row> ret(Void state, Integer a) { return pure(a * 10 + s[0]); }
       public Cell.Answered answer(Cell<Void> state, Store op) {
         return switch (op) {
           case GetOp get -> state.answer(get, s[0]);
@@ -101,15 +103,15 @@ final class Tck {
     }, null, p);
   }
 
-  static <R> Comp<R, Integer> fails(Row<R> in, int e, Comp<R, Integer> p) {
-    return intercept(Fail.class, in.fail(), new Handler<Fail, Integer, Integer, R>() {
+  static Comp<Integer, Row> fails(int e, Comp<Integer, Row> p) {
+    return intercept(Fail.class, new Handler<Fail, Integer, Integer, Row>() {
       public boolean mine(Fail op) {
         return switch (op) {
           case RaiseOp raise -> raise.e() == e;
         };
       }
-      public Comp<R, Integer> ret(Integer a) { return pure(a); }
-      public Comp<R, Integer> on(Fail op, K<R, Integer> k) {
+      public Comp<Integer, Row> ret(Integer a) { return pure(a); }
+      public Comp<Integer, Row> on(Fail op, K<Integer, Row> k) {
         return switch (op) {
           case RaiseOp raise -> pure(-1 - raise.n());
         };
@@ -117,44 +119,39 @@ final class Tck {
     }, p);
   }
 
-  static <R> Comp<R, Integer> build(Row<R> in, T t) {
+  static Comp<Integer, Row> build(T t) {
     return switch (t) {
       case Pure pure -> pure(pure.n());
-      case Tell tell -> perform(in.log(), new TellOp(tell.e(), tell.n())).map(done -> tell.n());
-      case Get get -> perform(in.store(), new GetOp(get.e()));
-      case Put put -> perform(in.store(), new PutOp(put.e(), put.n())).map(done -> put.n());
-      case Among among -> perform(in.choose(), new Choose.Among<>(among.ns()));
-      case Raise raise -> perform(in.fail(), new RaiseOp(raise.e(), raise.n()));
-      case Seq seq -> build(in, seq.a()).then(() -> build(in, seq.b()));
-      case Add add -> build(in, add.a()).flatMap(i -> build(in, add.b()).map(j -> i + j));
-      case WriterH w -> writer(in, w.e(), build(in, w.body()));
-      case StateH s -> state(in, s.e(), s.s0(), build(in, s.body()));
-      case ThrowsH f -> fails(in, f.e(), build(in, f.body()));
-      case ChooseH c -> {
-        // the body's row has a choice already: this handler is nearer, and answers it
-        Comp<R, List<Integer>> all = Choose.all(nearer -> build(in, c.body()).up());
-        yield all.map(vs -> vs.stream().mapToInt(v -> v).sum());
-      }
+      case Tell tell -> perform(new TellOp(tell.e(), tell.n())).map(done -> tell.n());
+      case Get get -> fit(up(perform(new GetOp(get.e()))));
+      case Put put -> up(perform(new PutOp(put.e(), put.n()))).map(done -> put.n());
+      case Among among -> fit(up(up(up(perform(new Choose.Among<>(among.ns()))))));
+      case Raise raise -> fit(up(up(perform(new RaiseOp(raise.e(), raise.n())))));
+      case Seq seq -> build(seq.a()).then(() -> build(seq.b()));
+      case Add add -> build(add.a()).flatMap(i -> build(add.b()).map(j -> i + j));
+      case WriterH w -> writer(w.e(), build(w.body()));
+      case StateH s -> state(s.e(), s.s0(), build(s.body()));
+      case ThrowsH f -> fails(f.e(), build(f.body()));
+      // the body's row has a choice already: this handler is nearer, and answers it
+      case ChooseH c -> Choose.all(up(build(c.body()))).map(vs -> vs.stream().mapToInt(v -> v).sum());
     };
   }
 
-  static <R> int outcome(Row<R> in, T t) {
-    return switch (step(build(in, t))) {
-      case Step.Done<R, Integer> done -> done.value();
-      case Step.Asked<R, ?, Integer> asked -> -1000000; // no handler
+  static int outcome(T t) {
+    return switch (step(build(t))) {
+      case Step.Done<Integer, Row> done -> done.value();
+      case Step.Asked<?, Integer, Row> asked -> -1000000; // no handler
     };
   }
 
   static long digest() {
-    Row<Cons<Log, Cons<Store, Cons<Fail, Cons<Choose, Nil>>>>> in =
-        new Row<>(In.here(), up(In.here()), up(up(In.here())), up(up(up(In.here()))));
     Random r = new Random(20261010L);
     long d = 0;
     for (int i = 0; i < 1000; i++) {
       T t = gen(r, 6);
       t = new StateH(0, 0, new StateH(1, 0, new WriterH(0, new WriterH(1, t))));
       t = new ChooseH(new ThrowsH(0, new ThrowsH(1, t)));
-      d = d * 31 + outcome(in, t);
+      d = d * 31 + outcome(t);
     }
     return d;
   }
