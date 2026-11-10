@@ -1,3 +1,3 @@
 //> using scala 3.3.8
 //> using test.dep org.scalameta::munit::1.3.6
-//> using options -Wunused:all -deprecation -feature
+//> using options -Wunused:all -deprecation -feature -Werror

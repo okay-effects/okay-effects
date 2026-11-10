@@ -129,6 +129,11 @@ class Properties extends munit.FunSuite:
       if n == 0 then pure(sum) else Async.await[Int](resume => resume(1)).flatMap(x => loop(n - 1, sum + x))
     assertEquals(Async.runBlocking(loop(1_000_000, 0)), 1_000_000)
 
+  test("an effect with no handler, and a handler with a case missing, do not compile"):
+    assert(compileErrors("run(State.get[Int])").nonEmpty)
+    assert(compileErrors("run(State.run(0)(Choose.among(1, 2)))").nonEmpty)
+    assert(compileErrors("run(Choose.all(State.run(0)(State.get[Int].flatMap(_ => Choose.among(1, 2)))))").isEmpty)
+
   test("no handler: an operation that reached the top is refused by name"):
     val open = State.get[Int].asInstanceOf[Int ! Any]
     assert(intercept[NoHandler](run(open)).op == State.Get())
