@@ -376,8 +376,10 @@ cd rust && cargo run --release --example bench
 - **The wire** leaves out tables and data frames, direct-style far sides (`once`) and `continue` with a
   condition, `bytes`, `zlib`, `verify` and `describe`, TCP, TLS and in-process links (the list is at the end of
   [wire/README.md](wire/README.md)). The transport is a child process's standard input and output. What is
-  checked is these three hosts and workers with each other and against the transcripts; no file here records a
-  run against another implementation of the okay wire.
+  checked is these three hosts and workers with each other and against the transcripts. A separate script,
+  [wire/family/check.sh](wire/family/README.md), runs our host with the far sides of okay-zig, okay-lean, okay-ts
+  and okay's Python shim, and okay's own host with our three workers; it needs those repositories beside this one
+  and is not part of `./test.sh`.
 - **The digest is compared with a constant.** The reference machine it is said to come from is not in this
   repository.
 - **Nothing is published** as an artifact: the kernels are used from the source of this repository.
