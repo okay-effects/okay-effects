@@ -24,10 +24,12 @@ Comp A  =  Done a                       a value
         |  Resume k x                   a continuation taken earlier, given its answer
         |  Ensure body fin              a computation, and a finalizer for when it is left (§7)
         |  Unwind k                     a continuation taken earlier, left: its finalizers run (§7)
+        |  After c k                    `c`, its value resuming `k`; left, `k` is left too (§9)
 
 Mark    =  (handler, its address)       how an operation finds the handler (§8)
 Frames  =  nil | next : Frames          what waits for a value inside one level
         |  finally fin : Frames         a finalizer that waits (§7)
+        |  resuming k : Frames          a continuation that waits for a value (`k.after`, §9)
 Level   =  (frames, mark or none, state)
 Stack   =  the top level, and the levels below it
 k       =  levels, the lowest first     immutable; called "pieces" in the code
@@ -36,8 +38,8 @@ Step A  =  Done a | Asked op k
 
 `pure a = Done a`, `perform op = Ask op`, `c >>= f = Bind c f`, `defer p = Bind (Done ()) (\_ -> p)`,
 `handle h c = Handle (mark of h) s0 c`, `k x = Resume k x`, `ensuring c fin = Ensure c fin`, `k.unwind = Unwind k`,
-and `bracket acquire use release = acquire >>= \s -> Ensure (use s) (release s)`. Building any of these runs
-nothing: a finalizer is a computation made when it is run.
+`k.after c = After c k`, and `bracket acquire use release = acquire >>= \s -> Ensure (use s) (release s)`.
+Building any of these runs nothing: a finalizer is a computation made when it is run.
 
 Frames are never written after they are made, and neither is a level that a continuation holds. In Java no level
 is written, and a continuation shares its levels with the stack it was taken from. In Scala a level on the stack is
@@ -74,6 +76,8 @@ mark. `(F, m, s)` is the top level, `B` the levels below.
 | `Ensure body fin` | `(F, m, s) · B` | `body`, on `(finally fin : F, m, s) · B` |
 | `Done x` | `(finally fin : F, m, s) · B` | `fin >>= \_ -> Done x`, on `(F, m, s) · B` |
 | `Unwind k` | `(F, m, s) · B` | the walk (below), on `k`'s levels above `(end : F, m, s) · B` |
+| `After c k` | `(F, m, s) · B` | `c`, on `(resuming k : F, m, s) · B` |
+| `Done x` | `(resuming k : F, m, s) · B` | `Resume k x`, on `(F, m, s) · B` |
 
 Details the table leaves out:
 
@@ -95,18 +99,21 @@ Details the table leaves out:
   `k` of an `Asked` has no handler to take out.
 - **The walk.** The frames are passed with no value, the top first. A bind's frame is dropped; its function does
   not run. At `finally fin : F` the finalizer runs: `fin`, on `walk : F`; its value comes to `walk`, is dropped,
-  and the walk goes on. A level with no frame left is popped without its `ret`, and its state is dropped. At its
-  own `end` the walk stops: `Done ()`, to the frames under `end`. The `end` of another unwinding, begun inside
-  this one, is passed like a bind's frame. A walk that comes to the bottom of the run is refused (§7).
+  and the walk goes on. At `resuming k : F`, `k` is unwound with its handler kept — its lowest level is put back as
+  it was, not gone, for the handler that left is one outside it —, on `walk : F`, and the walk goes on. A level
+  with no frame left is popped without its `ret`, and its state is dropped. At its own `end` the walk stops:
+  `Done ()`, to the frames under `end`. The `end` of another unwinding, begun inside this one, is passed like a
+  bind's frame. A walk that comes to the bottom of the run is refused (§7).
 - **A gone level** answers nothing. An operation of another entry passes it as it passed the handler. An operation
   of the handler's own entry goes on to the next handler outside when the handler kept its effect in the row
   (`intercept`). When the handler took its effect out (`handle`), nobody answers: the levels the operation passed
   are put back, and the walk goes on from the frames at the operation. So the finalizer that asked ends there,
   and a finalizer waiting inside it still runs. A gone level is part of a `k` like any level.
-- **Elsewhere.** Java has no `Ensure`: `ensuring` is a `Bind` whose function is the finalizer's frame, and a gone
-  level is a marker (§8) that takes one from the counts of the operations that pass it; an operation with
-  nothing to take from is the handler's own. Rust's `ensuring` pushes the finalizer's frame when the program
-  starts, and its gone level is a mark of the same type that answers nothing.
+- **Elsewhere.** Java has no `Ensure` and no `After`: `ensuring` is a `Bind` whose function is the finalizer's
+  frame, `k.after c` one whose function is the `resuming` frame, and a gone level is a marker (§8) that takes one
+  from the counts of the operations that pass it; an operation with nothing to take from is the handler's own.
+  Rust's `ensuring` pushes the finalizer's frame when the program starts, and its gone level is a mark of the same
+  type that answers nothing; its `k.after` and `k.pass` push the `resuming` frame when the computation starts.
 
 Every rule is a bounded amount of work, except the search for a handler, the replacing of a deeper state (Java), the
 taking and putting back of `k`, and the walk: these are linear in the number of levels they pass, the walk also in
@@ -172,7 +179,8 @@ A general clause may do any of these with `k`:
 - neither resume nor unwind it — nothing of the rest runs;
 - resume it many times (`Choose`) — the same value used again; each resumption starts from the levels as taken;
 - keep it and return (`Async`, `Emit.pull`) — it is resumed later, from elsewhere, by a new `step`;
-- ask the operation again and resume with the answer (under `intercept`) — interception, audit;
+- ask the operation again and resume with the answer (under `intercept`) — interception, audit; going on with
+  `k.after c` rather than `c >>= k`, so that `k` is unwound if `c` is left (§9);
 - ask operations of another effect, which is then in the row of the result — delegation.
 
 ## 6. State: per path, or a shared cell
@@ -255,7 +263,7 @@ three languages a program with an effect left does not compile.
 **What the model requires.** An operation asked at one entry of the row is answered by the handler that took that
 entry out: the nearest handler of that entry around it. An interceptor of the entry that stands between them is
 given the operation first. Handlers of other entries are passed, whatever their effects — also another entry of the
-same effect. With no handler left, `step` stops (§9). The three kernels decide "of that entry" in three ways.
+same effect. With no handler left, `step` stops (§10). The three kernels decide "of that entry" in three ways.
 
 - **Scala 3: by place.** `Comp[R[_], +A]`, written `A ! R`. A row is a type constructor: an effect (`Choose`,
   `State % Int`), `Pure`, or `R + E` — the effects in order. An operation is first a *word*, `word(op)`: a
@@ -324,7 +332,71 @@ An operation with no handler stops the run with the operation and `k`. Scala add
 of the whole run, by which its effect is known (`Asked.of`). Its `run` takes only the empty row, and throws
 `NoHandler` if the step stops at an operation all the same.
 
-## 9. The step, and the wire
+## 9. Control and audit
+
+An *interceptor* is a handler put by `intercept` (§4): it stands between a program and the handler of one of its
+effects, and each operation of that effect comes to it first. Its clause runs outside it: what it asks goes to the
+handler further out. Built on it:
+
+- **`k.after c`**: `c`, then `k` resumed with its value. If `c` is left — the handler that answers an operation of
+  `c` unwinds what waits for it —, `k` is unwound there too, with its own handler kept: the handler that left is
+  one outside it (§3, the walk). An interceptor goes on so. Written `c >>= k`, a `k` that the handler outside
+  leaves would be neither resumed nor unwound (§7, rule 7), and the finalizers of the program would not run.
+- **observe.** `observe see p`: each operation `op` of `F` in `p` shown to `see`, a computation of `p`'s row, then
+  asked again as it is: `intercept` with the clause `see op >>= \_ -> k.after (perform op)`. Value, answers and
+  states are as without it; what `see` asks is all that is added. Scala also has `around f p`: `f` is given the
+  operation and `proceed`, its way on, and gives the computation of its answer.
+- **The trail.** `Audit` is an ordinary effect: `record line`, and `trail`, a handler in place that keeps the lines
+  in order beside the value. It is handled outside the interceptors that record to it (their clauses run outside
+  them), and any other handler may take it instead. An auditor that records each operation when it comes and its
+  answer when it is given makes a trail that holds:
+  1. for a program of one path, its operations in the order it asks them, each `asked`, then `answered`; with two
+     auditors of one effect: inner asked, outer asked, outer answered, inner answered;
+  2. under a handler that resumes many times, what the machine runs, in the order it runs it: with `trail` outside
+     that handler, one trail through all the paths, path after path; inside it, each path its own trail (a state in
+     place, §6). An answer is recorded in the rest of whoever answers it: a handler that resumes twice past the
+     auditor's `k.after` records the answer twice;
+  3. in an unwinding, the operations of every finalizer that passes the auditor — the auditor is a level of the `k`
+     unwound, or is kept by `k.after`. An operation that ends a finalizer at a handler that has left (§7, rule 4) is
+     recorded as asked and not answered: nobody answers it, and the unwinding goes on;
+  4. at a refusal, what the auditor records; the operation is not passed on, and the program is left: its
+     finalizers run, and their operations are recorded.
+- **A sensitive effect** is one its author declares so. It is handled only under its **audit**: `audit i body`,
+  `body` of a row with the effect `S`, gives each operation of `S` to the interceptor `i` with the rest `k` and
+  `pass`, and is of the row with `Audited S` where `S` was. `pass op` asks `op` there, of the handler that
+  `handleAudited` put; nothing else asks an operation at `Audited S`, and only `handleAudited` takes it. The clause
+  may pass the operation on as it is, pass another, give another answer, or refuse: fail by an effect outside
+  (`Throws`), or end the program with a value of its own after `k.unwind`.
+  At run time `Audited S` is `S`: the same operations, found by the same means (§8). What it changes is what the
+  compiler accepts. `handle` and `intercept` refuse `S`; so does a stepped program's look at its operation (Scala's
+  `Asked.of`, Rust's `Asked::op`; Java's `step` throws `NoHandler` instead); no program asks `S` outside its audit;
+  `run` takes the empty row. So every operation of a sensitive effect that is answered has passed its audit.
+
+What each compiler refuses, and what is left:
+
+- **Scala.** A given `Sensitive[S]`, in the effect's companion. `handle`, `intercept`, `Asked.of` ask `Plain[E]`,
+  found by a macro when no `Sensitive[E]` is, and refused for an effect that is a type parameter: a function generic
+  in its effect asks `Plain[E]` of its caller. `Audited[S]` is opaque: outside its object there is no `In[S, R]` for
+  it. `handleAudited` asks `Split[Audited[S], R, Rest]`. Left: a cast; a `Sensitive` given that is not in the
+  companion holds only where it is in scope; a row written where an effect is meant (§8) is not refused by the
+  types, and answers no operation (`NoHandler`).
+- **Java.** A sensitive operation is a `Sensitive.Op<E, X, Self>`, asked by `Audit.perform` at a `Sensitive<E, R>`
+  place; the audit leaves an `Audited<E, R>` place. Both are below `Eff<E, R>`, and `handle`, `under` and `run` want
+  a row above: javac refuses them. `Effects.perform` takes only the kernel's `Op`. `Audit.handle` wants `Audited`.
+  The audit and the handler of `Audited` are one place of the row and two row levels of the machine, so the audit's
+  body runs under a marker, as `under` puts: what it asks of the places after the first passes both.
+  Left: a raw type or an unchecked cast; `null` as an answer, as anywhere; an interceptor by class is not given a
+  sensitive operation, a rule of the machine, not of the types; a program stepped throws `NoHandler` at run time.
+- **Rust.** `impl Effect for Pay { type Kind = Sensitive; }` — one impl per type. `handle`, `intercept` and
+  `Asked::op` ask `E: PlainEffect`, which only a kind `Plain` gives. `Audited<S>` is no effect, and nothing builds
+  it; `handle_audited` asks `Has<Audited<S>>`; `Pass` asks at it. Left: `unsafe`; a stepped program's operation
+  resumed by a `Reply` of the same answer type taken from another operation (a `Reply` is not tied to its `k`; see
+  the README's limits).
+
+No audit installed costs nothing at run time: the checks are types. Scala's `Plain` is `()`; Java's interceptor by
+class tests one class more when one stands in the program.
+
+## 10. The step, and the wire
 
 `step` stops at a value, or at an operation that no handler inside the computation accepts, with the rest as `k`.
 That is the protocol between a program and whoever runs it: "here is my value", or "here is what I ask; resume me
@@ -334,12 +406,13 @@ Across a process the same two moves are the okay wire's `done` and `perform` nod
 far side keeps each `k` under a number; only the operation's name and arguments cross one way, and its answer the
 other. On the far side a program asks the one operation `Call(name, args)` of the effect `Foreign` and is run by
 `step`. On the host a far program is a computation asking `Foreign`, so the host's ordinary handlers answer it —
-once, many times, or never. The whole protocol — calls, held objects, value escapes, streams under credit,
-frames, mux, auth — is specified in [wire/README.md](wire/README.md). On the host, `Remote.run` is a scope: when
+once, many times, or never —, and its calls are intercepted, observed or audited as any effect's (§9). The whole
+protocol — calls, held objects, value escapes, streams under credit, frames, mux, auth — is specified in
+[wire/README.md](wire/README.md). On the host, `Remote.run` is a scope: when
 the run is left — with its value, or because the host throws (panics, in Rust) — every stream still open is
 cancelled and every run begun is forgotten.
 
-## 10. Conformance
+## 11. Conformance
 
 A kernel conforms when:
 
@@ -353,11 +426,16 @@ A kernel conforms when:
    Scala and Java, one effect twice in a row, each entry with its own handler; in Scala, a program put into a
    bigger row, by `into` and where it is bound, its effects there in any order, calls in tail position from row
    to row and a program stepped and resumed in a loop in one level, and a row handled as one effect refused with
-   `NoHandler`.
+   `NoHandler`; control and audit as §9 says (`Audits` in Scala and Java, `tests/audit.rs` in Rust, named alike):
+   an observer that changes nothing, the trail of one path, under a choice, an auditor that refuses and one that
+   changes an operation, two auditors of one effect, an audit between two handlers of one effect, a sensitive effect
+   under its audit, audit with `ensuring`, a hundred thousand audited operations in constant stack, and a far
+   program audited by the host (the wire's tests).
 2. **Programs that must not run do not compile**: an effect left in the row (`java/negative/`, the doctests of
    `rust/src/lib.rs`, `compileErrors` in the Scala `Properties`), an answer of the wrong type and a handler that
    misses an operation (`java/negative/`, the doctests), an operation whose class is not of the effect it names
-   (`java/negative/WrongOperation.java`).
+   (`java/negative/WrongOperation.java`), a sensitive effect handled, intercepted or asked other than under its
+   audit (`java/negative/Sensitive*.java`, the doctests, `compileErrors` in the Scala `Audits`).
 
 3. **The TCK digest is the reference's.** A generator draws 1000 terms of depth 6 from `java.util.Random(20261010)`:
    pure, tell, get, put, among, raise, sequence, sum, and handlers of a writer, a state, a failure and a choice.

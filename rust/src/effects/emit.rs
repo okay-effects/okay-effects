@@ -5,10 +5,14 @@ use std::cell::{OnceCell, RefCell};
 use std::mem::swap;
 use std::rc::Rc;
 
-use crate::{Comp, Handler, Has, K, Prog, Reply, There, defer, eff, perform, pure};
+use crate::{Comp, Effect, Handler, Has, K, Plain, Prog, Reply, There, defer, eff, perform, pure};
 
 pub enum Emit<T> {
     Send(T, Reply<()>),
+}
+
+impl<T: 'static> Effect for Emit<T> {
+    type Kind = Plain;
 }
 
 impl<T: Clone + 'static> Emit<T> {

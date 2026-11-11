@@ -36,8 +36,11 @@ object Comp:
   /** a computation, and the finalizer that runs when it is left: with its value, or unwound */
   private[scala] final case class Ensure[R[_], +A](body: Comp[R, A], finalizer: () => Comp[R, Any])
       extends Comp[R, A]
+  /** a computation, its value resuming a continuation taken earlier; left, the continuation is left too */
+  private[scala] final case class After[R0[_], V0, X, R[_], A](first: Comp[R, X], k: Machine.K[R0, V0, X, R, A])
+      extends Comp[R, A]
   /** a continuation taken earlier, unwound: its finalizers run, and nothing else of it */
-  private[scala] final case class Unwind[R0[_], V0, X, R[_], A](k: Machine.K[R0, V0, X, R, A])
+  private[scala] final case class Unwind[R0[_], V0, X, R[_], A](k: Machine.K[R0, V0, X, R, A], kept: Boolean = false)
       extends Comp[R, Unit]
 
   /** a word is a program of any row that has its effect: its place is found where the row is known */
@@ -81,7 +84,7 @@ object Step:
   /** an operation no handler answered: its place in the row, and the rest of the program */
   final case class Asked[R[_], E[_], X, +A](at: In[E, R], op: E[X], k: Continuation[X, R, A]) extends Step[R, A]:
     /** this, as an operation of `F`, when it is one: when its place is `F`'s place */
-    def of[F[_]](using place: In[F, R]): Option[Asked[R, F, X, A]] =
+    def of[F[_]](using place: In[F, R])(using Plain[F]): Option[Asked[R, F, X, A]] =
       Option(at.place.same[F, [G[_]] =>> Asked[R, G, X, A]](place.place, this))
 
 /** An operation whose place says no effect: a row was given where an effect is meant — handled, or put into
@@ -106,6 +109,11 @@ final class NoUnwinding extends RuntimeException("the rest of an unwinding was r
 abstract class Continuation[-X, R[_], +B] private[scala] () extends (X => B ! R):
   /** this continuation left: its finalizers, then `()` */
   def unwind: Unit ! R
+  /** `c`, then this continuation resumed with its value. If `c` is left — the handler that answers it unwinds
+   * what waits for it —, this continuation is unwound there too, so its finalizers run. What an interceptor's
+   * clause goes on with: `k.after(proceed)`, where `proceed.flatMap(k)` would leave `k` neither resumed nor
+   * unwound. */
+  def after(c: X ! R): B ! R
   /** how many levels it holds: what the tests count, of a loop that must gather none */
   private[scala] def levels: Int
 
@@ -211,13 +219,16 @@ def ensuring[A, R[_]](p: A ! R)(finalizer: => Any ! R): A ! R = Comp.Ensure(p, (
 def bracket[S, A, R[_]](acquire: S ! R)(use: S => A ! R)(release: S => Any ! R): A ! R =
   Comp.Bind(acquire, s => Comp.Ensure(use(s), () => release(s)))
 
-/** `E` handled by `h` from wherever it is in `p`'s row: the program over the rest */
-def handle[E[_], R[_], Rest[_], A, B](p: A ! R, h: Handler[E, Rest, A, B])(using at: Split[E, R, Rest]): B ! Rest =
+/** `E` handled by `h` from wherever it is in `p`'s row: the program over the rest. A sensitive effect is refused:
+ * it is handled by `handleAudited`, under its audit (Audit.scala). */
+def handle[E[_], R[_], Rest[_], A, B](p: A ! R, h: Handler[E, Rest, A, B])(using at: Split[E, R, Rest])(using
+    Plain[E]): B ! Rest =
   Comp.Handle(Machine.Takes(at.place), h, p)
 
 /** `handle`, the effect kept in the row: each operation at `E`'s place is given to `h` first, and a clause may
- * ask it again — it goes to the handler of that place further out. Interception, audit, delegation. */
-def intercept[E[_], R[_], A, B](p: A ! R, h: Handler[E, R, A, B])(using at: In[E, R]): B ! R =
+ * ask it again — it goes to the handler of that place further out. Interception, audit, delegation. A sensitive
+ * effect is refused: its interceptor is its `audit` (Audit.scala). */
+def intercept[E[_], R[_], A, B](p: A ! R, h: Handler[E, R, A, B])(using at: In[E, R])(using Plain[E]): B ! R =
   Comp.Handle(Machine.Keeps(at.place), h, p)
 
 /** a computation run to its next question that no handler in it answers */

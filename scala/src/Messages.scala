@@ -27,6 +27,23 @@ object Messages:
     else report.errorAndAbort(s"the row $r without the effect $e is not ${written(TypeRepr.of[Rest])}: a handler " +
       "leaves the row as it is written, its effect taken out")
 
+  /** `Plain[E]`: refused for a sensitive effect, and for an effect that is a type parameter — its caller says */
+  def plain[E[_]: Type](using Quotes): Expr[Plain[E]] =
+    import quotes.reflect.*
+    val effect = TypeRepr.of[E]
+    def head(t: TypeRepr): TypeRepr = t.dealias match
+      case TypeLambda(_, _, body) => head(body)
+      case AppliedType(f, _) => head(f)
+      case other => other
+    if head(effect).typeSymbol.isTypeParam then
+      report.errorAndAbort(s"the effect ${written(effect)} is not known here, so it may be sensitive: ask it of the " +
+        s"caller, `(using Plain[${written(effect)}])`")
+    Implicits.search(TypeRepr.of[Sensitive[E]]) match
+      case _: ImplicitSearchSuccess =>
+        report.errorAndAbort(s"the effect ${written(effect)} is sensitive: it is handled only under its audit — " +
+          "`audit` it with an interceptor, then handle it with `handleAudited`")
+      case _ => '{ Plain.checked[E] }
+
   /** a row or an effect as it is written: `+` and `%` for the lambdas they make, `Pure` for `Void` */
   def written(using Quotes)(t: quotes.reflect.TypeRepr): String =
     import quotes.reflect.*

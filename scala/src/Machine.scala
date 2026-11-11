@@ -45,6 +45,9 @@ private[scala] object Machine:
   final class Unwinding[R[_], Y, V](val rest: Frames[R, Y, V], val to: AnyRef) extends Frames[R, Any, V]
   /** the end of an unwinding: `()` to what waits for it */
   final class Unwound[R[_], V](val rest: Frames[R, Unit, V]) extends Frames[R, Any, V]
+  /** `k.after(c)`: a value that comes here resumes `k`; an unwinding that passes here unwinds `k`, then goes on */
+  final class Resuming[R0[_], V0, X, R[_], B, V](val k: K[R0, V0, X, R, B], val rest: Frames[R, B, V])
+      extends Frames[R, X, V]
   /** frames, and those that waited outside them: what was two levels, one put back on the other (`onto`). A value
    * that comes here finds them two again */
   final class After[R[_], X, Y, V](val first: Frames[R, X, Y], val rest: Frames[R, Y, V]) extends Frames[R, X, V]
@@ -187,8 +190,11 @@ private[scala] object Machine:
     def inner: Frames[R0, X, V0]
     def over[W, P[_], Z](outside: Frames[Out, B, W], below: Level[Out, W, P, Z]): Level[R0, V0, P, Z]
     def left[W, P[_], Z](end: Unwound[Out, W], below: Level[Out, W, P, Z]): Level[R0, V0, P, Z]
+    /** put back to be unwound, its handler kept: `after` unwinds it because a handler outside left, not this one */
+    def kept[W, P[_], Z](end: Unwound[Out, W], below: Level[Out, W, P, Z]): Level[R0, V0, P, Z] = left(end, below)
     def apply(x: X): Comp[Out, B] = Comp.Resume(this, x)
     def unwind: Comp[Out, Unit] = Comp.Unwind(this)
+    def after(c: Comp[Out, X]): Comp[Out, B] = Comp.After(c, this)
 
   /** the rest of the program under a general handler: the handler is put back too */
   final class Under[R0[_], V0, X, E[_], R[_], Out[_], A, B](val inner: Frames[R0, X, V0],
@@ -199,6 +205,8 @@ private[scala] object Machine:
       put(taken, General(way, handler, outside, below))
     def left[W, P[_], Z](end: Unwound[Out, W], below: Level[Out, W, P, Z]): Level[R0, V0, P, Z] =
       putLeft(taken, Gone[E, R, Out, A, W, P, Z](way, end, below), end)
+    override def kept[W, P[_], Z](end: Unwound[Out, W], below: Level[Out, W, P, Z]): Level[R0, V0, P, Z] =
+      putLeft(taken, General(way, handler, Unwinding[Out, Any, W](end, end), below), end)
 
   /** the rest of the whole run, after an operation no handler answered */
   final class Whole[R0[_], V0, X, P0[_], Z0](val inner: Frames[R0, X, V0], taken: Taken[R0, V0, P0, Z0])
@@ -279,10 +287,13 @@ private[scala] object Machine:
       : Next[P, Z] = c match
     case embedded: Comp.Embedded[r, s, a] => entering[r, s, a, V, P, Z](embedded.sub, embedded.body, frames, level)
     case ensure: Comp.Ensure[r, x] => Go[r, x, V, P, Z](ensure.body, Finally[r, x, V](ensure.finalizer, frames), level)
+    case after: Comp.After[r0, v0, x, r, b] =>
+      Go[r, x, V, P, Z](after.first, Resuming[r0, v0, x, r, b, V](after.k, frames), level)
     case unwind: Comp.Unwind[r0, v0, x, r, b] =>
       val k: K[r0, v0, x, r, b] = unwind.k
       val end = Unwound[r, V](frames)
-      walk[r0, x, v0, P, Z](k.inner, k.left[V, P, Z](end, level), end)
+      val levels = if unwind.kept then k.kept[V, P, Z](end, level) else k.left[V, P, Z](end, level)
+      walk[r0, x, v0, P, Z](k.inner, levels, end)
     case _ => frames match
       case last: Finally[r, ?, ?] =>
         Go[r, Any, V, P, Z](last.finalizer(), Then[r, Any, X, V](_ => c, last.rest), level)
@@ -290,6 +301,10 @@ private[scala] object Machine:
       case end: Unwound[r, ?] => Go[r, Unit, V, P, Z](Comp.Done[r, Unit](()), end.rest, level)
       case both: After[r, ?, y, ?] => lean[r, X, y, V](both.first, both.rest) match
         case two: After[r2, ?, y2, ?] => Go[r2, X, y2, P, Z](c, two.first, apart[r2, y2, V, P, Z](two.rest, level))
+      case resuming: Resuming[r0, v0, x, r, b, ?] => c match
+        case done: Comp.Done[?, ?] =>
+          Go[r, b, V, P, Z](Comp.Resume[r0, v0, x, r, b](resuming.k, done.value), resuming.rest, level)
+        case _ => Go[R, X, V, P, Z](c, frames, level)
       case _ => Go[R, X, V, P, Z](c, frames, level)
 
   /** frames after frames, the first of them no such pair: of a loop's turns, each put after the last, the first
@@ -333,6 +348,8 @@ private[scala] object Machine:
       case last: Finally[r, x, ?] =>
         Go[r, Any, V, P, Z](last.finalizer(), Unwinding[r, x, V](last.rest, to), level)
       case on: Unwinding[r, y, ?] => walk[r, y, V, P, Z](on.rest, level, to)
+      case resuming: Resuming[?, ?, ?, r, b, ?] =>
+        Go[r, Unit, V, P, Z](Comp.Unwind(resuming.k, kept = true), Unwinding[r, b, V](resuming.rest, to), level)
       case end: Unwound[r, ?] =>
         if end eq to then Go[r, Unit, V, P, Z](Comp.Done[r, Unit](()), end.rest, level)
         else walk[r, Unit, V, P, Z](end.rest, level, to)

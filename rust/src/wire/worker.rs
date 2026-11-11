@@ -25,6 +25,10 @@ pub enum Fed {
     Next(Reply<Option<Json>>),
 }
 
+impl crate::Effect for Fed {
+    type Kind = crate::Plain;
+}
+
 impl Fed {
     /// The caller's next value, waited for; none at the stream's end.
     pub fn next<R: Has<Self, I>, I>() -> impl Prog<Option<Json>, R> {

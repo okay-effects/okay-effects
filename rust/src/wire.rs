@@ -11,7 +11,7 @@
 //!   remote      the host's side: a far side as an effect
 
 use crate::json::Json;
-use crate::{Has, Prog, Reply, perform};
+use crate::{Effect, Has, Plain, Prog, Reply, perform};
 
 pub mod auth;
 pub mod cbor;
@@ -28,6 +28,10 @@ pub use worker::{Fed, Function, Module, Row, Thing, serve};
 pub enum Foreign {
     /// a name and arguments
     Call(String, Vec<Json>, Reply<Json>),
+}
+
+impl Effect for Foreign {
+    type Kind = Plain;
 }
 
 pub fn call<R: Has<Foreign, I>, I>(name: &str, args: Vec<Json>) -> impl Prog<Json, R> + use<R, I> {

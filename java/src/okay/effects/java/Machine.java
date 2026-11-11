@@ -14,6 +14,7 @@ import java.util.function.Supplier;
  *   Resume     the levels of a `k` are put back on top
  *   ensuring   a bind whose frame holds the finalizer (`Finally`): a value that comes to it waits while the
  *              finalizer runs
+ *   k.after    a bind whose frame resumes `k` (`Resuming`); walked, it unwinds `k`
  *   Unwind     the levels of a `k` are put back on top, without its handler, and walked
  *   Walk       UNWINDING: the frames are passed with no value, a finalizer's frame runs its finalizer, a level is
  *              left without its `ret` — to the end of the unwinding, which gives nothing to what waited for it
@@ -52,12 +53,16 @@ final class Machine {
     /** where a handler that took its place of the row was, and one that kept its effect there */
     static final Mark GONE = marker(0, -1);
     static final Mark KEPT = marker(1, -1);
+    /** not a mark: an unwinding by `K.after`, where the handler stays, for one outside it has left */
+    static final Mark STAYS = marker(0, 0);
 
     boolean marker() { return by != 0; }
 
-    /** an interceptor's question: is the operation of its class, and its own */
+    /** an interceptor's question: is the operation of its class, and its own. A sensitive operation is never: its
+     * only interceptor is its audit */
     boolean accepts(Object op) {
-      return effect.isInstance(op) && (general != null ? general.mine(op) : inPlace.mine(op));
+      return effect.isInstance(op) && !(op instanceof Sensitive.Op)
+          && (general != null ? general.mine(op) : inPlace.mine(op));
     }
   }
 
@@ -68,6 +73,12 @@ final class Machine {
    * the finalizer and goes on. */
   record Finally<A>(Supplier<? extends Comp<?, ?>> finalizer) implements Function<A, Comp<A, ?>> {
     public Comp<A, ?> apply(A a) { return new Comp.Bind<>(finalizer.get(), dropped -> new Comp.Done<>(a)); }
+  }
+
+  /** `k.after(c)`: the frame of `c`'s value, which resumes `k`. An unwinding that passes it unwinds `k`, its
+   * handler staying, and goes on. */
+  record Resuming<X, B>(Pieces k) implements Function<X, Comp<B, ?>> {
+    public Comp<B, ?> apply(X x) { return new Comp.Resume<>(k, x); }
   }
 
   /** the end of an unwinding, a frame over what waited for it: nothing is given on */
@@ -106,7 +117,11 @@ final class Machine {
           // the common case first: asked plainly, right under the handler of the row's first effect
           int found = mark != null && mark.row && ask.skip == 0 ? 0 : find(op, ask.skip, mark, below);
           if (found < 0) {
-            if (found == -1) return new Step.Asked(ask.op, take(frames, mark, state, below, -1));
+            if (found == -1) {
+              // a sensitive operation is answered under its audit only: not by whoever steps the program
+              if (!(ask.op instanceof Op)) throw new NoHandler(ask.op);
+              return new Step.Asked((Op) ask.op, take(frames, mark, state, below, -1));
+            }
             // its handler has left: the finalizer that asks ends here, and the unwinding goes on from here
             c = new Comp.Walk(ending(found == -2 ? below : level(below, -2 - found).below));
             continue;
@@ -153,7 +168,8 @@ final class Machine {
           Comp.Walk walk = new Comp.Walk(end);
           below = new Level(new Frames(end, frames), mark, state, below);
           Pieces piece = unwind.k;
-          Mark at = piece.mark != null && piece.mark.row ? unwind.left : null;
+          Mark at = unwind.left == Mark.STAYS ? piece.mark
+              : piece.mark != null && piece.mark.row ? unwind.left : null;
           while (piece.above != null) {
             below = new Level(new Frames(walk, piece.frames), at, piece.state, below);
             piece = piece.above;
@@ -171,6 +187,10 @@ final class Machine {
               frames = below.frames; mark = below.mark; state = below.state; below = below.below;
             } else if (frames.next instanceof Finally last) {
               c = (Comp) last.finalizer.get();
+              frames = new Frames(walk, frames.rest);
+              continue run;
+            } else if (frames.next instanceof Resuming rest) {
+              c = new Comp.Unwind(rest.k, Mark.STAYS);
               frames = new Frames(walk, frames.rest);
               continue run;
             } else if (frames.next == walk.to) {

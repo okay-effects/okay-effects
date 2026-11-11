@@ -6,7 +6,8 @@ import okay.effects.scala.std.*
 /** A rough measure, the same in the three languages: nanoseconds an operation, the best of several rounds.
  * `state`: get and put in a loop. `reader3`: an ask answered three handlers away. `choose`: a continuation taken
  * twice at every step of a tree. `binds`: a loop of nothing but binds. `embed`: the loop of `state`, its get and
- * put a program of the state alone, bound in a program of a bigger declared row — put into it at every bind. */
+ * put a program of the state alone, bound in a program of a bigger declared row — put into it at every bind.
+ * `audited`: a loop of operations of a sensitive effect, each passed by its audit to a handler in place. */
 object Bench:
   def count[R[_]: Has[State % Int]](n: Int): Int ! R =
     if n == 0 then State.get else State.get.flatMap(s => State.put(s + 1)).flatMap(_ => count(n - 1))
@@ -28,6 +29,17 @@ object Bench:
   type Wider[X] = (Writer % String + State % Int)[X]
   type Under3[X] = (Reader % Int + State % Int + State % String + Writer % String)[X]
 
+  def meter[R[_]: Has[Meter]](n: Int, sum: Int): Int ! R =
+    if n == 0 then pure(sum) else word(Meter.Tick()).flatMap(x => meter(n - 1, sum + x))
+
+  val passing = new Interceptor[Meter, Audited[Meter], Int, Int]:
+    def ret(a: Int) = pure(a)
+    def apply[X](op: Meter[X], k: Continuation[X, Audited[Meter], Int], pass: Pass[Meter, Audited[Meter]]) =
+      k.after(pass(op))
+
+  val ticked = Handler.tail[Meter, Pure, Int, Int](pure)([X] => (op: Meter[X]) => op match
+    case Meter.Tick() => 1)
+
   def measure(name: String, ops: Int)(body: => Any): Unit =
     val best = (1 to 7).map { _ =>
       val start = System.nanoTime()
@@ -44,3 +56,11 @@ object Bench:
     measure("choose", 1 << 18)(run(Choose.all(tree[Choose](18)).map(_.size)))
     measure("binds", n)(run(binds(n, 0)))
     measure("embed", 2 * n)(run(Writer.run(State.run(0)(ticks(n)))))
+    measure("audited", n)(run(handleAudited(audit(passing)(meter[Audited[Meter] + Meter](n, 0)), ticked)))
+
+/** a sensitive effect: a tick of a meter */
+enum Meter[X]:
+  case Tick() extends Meter[Int]
+
+object Meter:
+  given Sensitive[Meter] = Sensitive()

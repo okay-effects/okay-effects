@@ -28,6 +28,10 @@ pub enum Far {
     Pull(i64, Reply<Result<Option<Json>, Condition>>),
 }
 
+impl crate::Effect for Far {
+    type Kind = crate::Plain;
+}
+
 /// A call to be opened as a stream: its arguments as they cross, the credit, the values this side feeds it, if any.
 pub struct Opening {
     pub name: String,

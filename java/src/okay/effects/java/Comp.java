@@ -13,11 +13,12 @@ public abstract sealed class Comp<A, R> {
     Done(A value) { this.value = value; }
   }
 
-  /** a question: an operation, to be answered by the handler `skip` row levels past the nearest */
+  /** a question: an operation, to be answered by the handler `skip` row levels past the nearest. An {@link Op},
+   * or a {@link Sensitive.Op}, which only {@link Audit} asks */
   static final class Ask<X, R> extends Comp<X, R> {
-    final Op<?, X, ?> op;
+    final Object op;
     final int skip;
-    Ask(Op<?, X, ?> op, int skip) { this.op = op; this.skip = skip; }
+    Ask(Object op, int skip) { this.op = op; this.skip = skip; }
   }
 
   /** a computation, and what follows its value; the rows of the two were checked where they were bound */

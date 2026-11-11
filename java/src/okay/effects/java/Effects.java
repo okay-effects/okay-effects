@@ -40,7 +40,7 @@ public final class Effects {
   /** `c`, its operations that skip `keep` handlers or more skipping one more. An operation alone carries its
    * count, so the common case costs nothing at run time; any other computation runs under a marker that the
    * search for a handler counts. Two markers of one kind are one. */
-  private static <A> Comp<A, ?> lifted(Comp<A, ?> c, int keep) {
+  static <A> Comp<A, ?> lifted(Comp<A, ?> c, int keep) {
     return switch (c) {
       case Comp.Done<A, ?> done -> done;
       case Comp.Ask<A, ?> ask -> ask.skip < keep ? ask : new Comp.Ask<>(ask.op, ask.skip + 1);
@@ -89,6 +89,20 @@ public final class Effects {
   public static <F, S, A, B, R> Comp<B, R> intercept(
       Class<F> effect, InPlace<F, S, A, B, R> h, S s0, Comp<A, ? super R> p) {
     return new Comp.Handle<>(Machine.Mark.handler(effect, null, h, false), s0, p);
+  }
+
+  /** each operation of {@code F}, the first effect of the program's row, shown to {@code see} — a program run
+   * before the operation goes on as it is, to the handler of that place further out: a trace, a count, a trail.
+   * Nothing of the program changes. At the effect's place, as {@code Reader.local}: {@code F} may have type
+   * arguments, and a sensitive place is refused ({@code under} takes no {@link Sensitive} or {@link Audited}). */
+  public static <F, A, T> Comp<A, Eff<F, ? extends T>> observe(Class<? super F> effect,
+      Function<? super F, ? extends Comp<?, ? super Eff<F, ? extends T>>> see, Comp<A, ? super Eff<F, T>> p) {
+    return handle(effect, new Handler<F, A, A, Eff<F, ? extends T>>() {
+      public Comp<A, Eff<F, ? extends T>> ret(A a) { return pure(a); }
+      public Comp<A, Eff<F, ? extends T>> on(F op, K<A, Eff<F, ? extends T>> k) {
+        return new Comp.Bind<>(see.apply(op), seen -> k.again());
+      }
+    }, under(p));
   }
 
   /** a computation run to its next question that no handler in it answers */

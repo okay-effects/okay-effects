@@ -157,6 +157,10 @@ enum Account {
     Deposit(i64, Reply<i64>),
 }
 
+impl Effect for Account {
+    type Kind = Plain;
+}
+
 fn deposit<R: Has<Account, I>, I>(amount: i64) -> impl Prog<i64, R> {
     perform(|r| Account::Deposit(amount, r))
 }

@@ -38,12 +38,14 @@ Unwinding `k` puts them back to be left: the finalizers waiting in them run, and
 | endless streams | the rest of the program after `send` is a value the consumer keeps and pulls |
 | asynchrony | a handler may keep `k` and return; whoever has the answer resumes it later |
 | what a program holds is released when it is left | `ensuring`: a finalizer is a frame; a value that passes it runs it, and a handler that does not resume `k` unwinds it |
-| interception, audit, delegation | a handler may keep its effect in the row (`intercept`); a clause may ask any operation |
+| interception, audit, delegation | a handler may keep its effect in the row (`intercept`); a clause may ask any operation; `k.after` leaves the rest when what it waits for is left |
+| every operation of a sensitive effect passes its audit | `handle` and `intercept` refuse a sensitive effect; `audit` puts an interceptor on it and leaves `Audited` in its place, which only `handleAudited` takes |
 | no program with an effect left runs | the row is in the type of the computation, and `run` takes the empty row |
 
-The lines are tests in `Properties` of each language, named alike. The answer in place is how the standard State,
-Reader and Writer answer in all of them. The last line is checked by programs that must not compile, in Java
-(`java/negative/`), Rust (doctests of `rust/src/lib.rs`) and Scala (`compileErrors` in `Properties`).
+The lines are tests in `Properties` of each language, named alike (the last two in `Audits`, and `tests/audit.rs` in
+Rust). The answer in place is how the standard State, Reader and Writer answer in all of them. What the compiler
+refuses is checked by programs that must not compile, in Java (`java/negative/`), Rust (doctests of
+`rust/src/lib.rs`) and Scala (`compileErrors` in `Properties` and `Audits`).
 
 ## One program, three languages
 
@@ -150,6 +152,10 @@ pub enum State<S> {
     Put(S, Reply<()>),
 }
 
+impl<S: 'static> Effect for State<S> {
+    type Kind = Plain;    // any handler takes it; a `Sensitive` effect only its audit's (below)
+}
+
 impl<S: Clone + 'static> State<S> {
     pub fn run<R: Has<Self, I>, I, A: 'static>(s0: S, p: impl Prog<A, R>) -> impl Prog<(S, A), R::Rest> {
         let answer = |state: &mut S, op| match op {
@@ -225,6 +231,93 @@ let rescued = Throws::recover(|e: String| said(format!("rescued {e}")).map(|_| 0
 assert_eq!(logged(|| rescued.run()), (0, told(["body", "closed", "rescued no"])));
 ```
 
+## Control and audit
+
+An interceptor stands between a program and the handler of one of its effects: each operation comes to it first.
+`observe` shows each one to a program of the row and passes it on; Scala's `around` gives the answer. An auditor
+records to a trail — `Audit` (`Trail` in Java), an ordinary effect, handled outside it — and decides: the operation
+passed on, changed, answered, or refused. It goes on with the rest by `k.after(c)`: if the handler that answers `c`
+leaves, the rest is left with it, and the program's finalizers run.
+
+An effect its author declares SENSITIVE is handled only under its audit. `handle` and `intercept` refuse it; `audit`
+gives each of its operations to an interceptor, with `pass`, its one way on, and leaves `Audited` where the effect
+was; only `handleAudited` takes that. No program asks the effect outside its audit. The rules, and what the trail
+holds under many paths and in an unwinding, are [SPEC.md](SPEC.md) §9. Payments, audited, each operation recorded
+when it is asked and when it is answered — the test "sensitive: handled under its audit it runs, the trail complete"
+of each language:
+
+```scala
+object Pay:
+  given Sensitive[Pay] = Sensitive()
+
+def recorded[T[_], A](using In[Audit, T]): Interceptor[Pay, T, A, A] = new Interceptor[Pay, T, A, A]:
+  def ret(a: A) = pure(a)
+  def apply[X](op: Pay[X], k: Continuation[X, T, A], pass: Pass[Pay, T]): A ! T =
+    val asked = op match
+      case Pay.Transfer(to, amount) => s"transfer $amount to $to"
+      case Pay.Balance() => "balance"
+    told(asked).flatMap(_ => k.after(pass(op).flatMap(x => told(s"$asked → $x").map(_ => x))))
+
+type Outside[X] = (Audit + Audited[Pay])[X]
+val audited = audit(recorded[Outside, Int])(payments[Outside + Pay])
+run(Audit.trail(handleAudited(audited, bank[Audit, Int](1000))))
+// (List("transfer 100 to a", "transfer 100 to a → ok:a:100", "balance", "balance → 900", ...), (850, 900))
+```
+
+```java
+sealed interface Pay {
+  record Transfer(String to, int amount) implements Pay, Sensitive.Op<Pay, String, Transfer> {}
+  record Balance() implements Pay, Sensitive.Op<Pay, Integer, Balance> {}
+}
+
+static Interceptor<Pay, Integer, Eff<Trail, ?>> recorded() {
+  return (op, pass, k) -> switch (op) {
+    case Pay.Transfer t -> {
+      String asked = "transfer " + t.amount() + " to " + t.to();
+      yield Audits.<Audited<Pay, Eff<Trail, ?>>>note(asked).flatMap(d ->
+          k.after(t, pass.pass(t).flatMap(x -> Audits.<Audited<Pay, Eff<Trail, ?>>>note(asked + " → " + x)
+              .map(e -> x))));
+    }
+    case Pay.Balance b -> ...
+  };
+}
+
+run(Trail.keep(bank(1000, Audit.audit(recorded(), payments()))));   // payments() asks by Audit.perform
+```
+
+```rust
+impl Effect for Pay {
+    type Kind = Sensitive;
+}
+
+fn recorded() -> Interceptor<Pay, i64, i64, Outside> {
+    Interceptor::new(pure, |op, pass: Pass<Pay, Outside>, k: K<i64, Outside>| match op {
+        Pay::Transfer(to, amount, r) => {
+            let asked = format!("transfer {amount} to {to}");
+            told(asked.clone())
+                .then(move || {
+                    let passed = pass.perform(move |r| Pay::Transfer(to, amount, r));
+                    k.after(r, passed.flat_map(move |x: String| told(format!("{asked} → {x}")).map(move |_| x)))
+                })
+                .boxed()
+        }
+        Pay::Balance(r) => ...
+    })
+}
+
+let audited = recorded().audit(payments::<eff![Pay, Audited<Pay>, Audit], _>());
+Audit::trail(bank(1000).handle_audited(audited)).run();
+```
+
+What the compiler refuses, each a program that does not compile: in Scala (`compileErrors` in `Audits`) a sensitive
+effect handled, intercepted or looked at in a stepped program ("the effect Pay is sensitive: it is handled only under
+its audit"), `handleAudited` with no audit before it, the effect asked outside its audit, a handler generic in its
+effect ("not known here", unless it asks `Plain[E]` of its caller); in Java (`java/negative/Sensitive*.java`) the
+effect handled, put `under` another, handled audited with no audit, run, performed as a plain operation, given a
+plain row, and asked by an interceptor past its `pass`; in Rust (the doctests of `rust/src/lib.rs`) the effect
+handled or intercepted ("a sensitive effect is handled only under its audit"), handled audited with no audit, asked
+outside its audit, `Audited<Pay>` taken as an effect, and seen by whoever steps the program.
+
 ## Compatible: with each other, and with the family
 
 - **The same answers.** Each kernel builds the family's TCK — a thousand random programs: handlers of logs, states,
@@ -258,6 +351,11 @@ assert_eq!(logged(|| rescued.run()), (0, told(["body", "closed", "rescued no"]))
 | a continuation resumed many times | yes | yes | yes (`K` is `Clone`; a state in place and what a closure holds are `Clone`) |
 | the rest of the program left | `k.unwind`; `Handler.abort` | `k.unwind()`; an interceptor at a place leaves with `K.unwindKeeping(k, op)` | `k.unwind()`; `Handler::abort`; a `k` dropped runs no finalizer |
 | threads | `k` may be resumed from any thread (Async's timer does) | the same | one thread: `Rc`, a thread-local pool |
+| an effect declared sensitive | `given Sensitive[Pay] = Sensitive()` in its companion | its operations are `Sensitive.Op<Pay, X, Self>`, asked by `Audit.perform` | `impl Effect for Pay { type Kind = Sensitive; }` (every effect says its kind) |
+| a sensitive effect handled other than under its audit | compile error: `handle`, `intercept`, `Asked.of` ask `Plain[E]`, refused for a sensitive effect and for an effect that is a type parameter (its caller is asked) | compile error: its places, `Sensitive<E, R>` and `Audited<E, R>`, are below `Eff<E, R>`, and `handle`, `under`, `run` want a row above | compile error: `handle`, `intercept`, `Asked::op` ask `E: PlainEffect` |
+| asked outside its audit | compile error: `Audited[Pay]` is opaque, no `In[Pay, R]` | compile error: only the audit's `Pass` asks at `Audited` | compile error: `Audited<Pay>` is not `Pay`, no `Has<Pay, I>` |
+| what can still defeat it | a cast; a `Sensitive` given outside the companion holds only where it is in scope | a raw type or an unchecked cast; a stepped program's sensitive operation is refused at run time (`NoHandler`) | `unsafe`; a stepped program resumed by a `Reply` of the same type taken from another operation |
+| an interceptor of an effect with type arguments | anywhere: `around`, `observe`, `intercept` by place | at its place only: `observe` and `handle(.., under(p))`; by class, only an effect without type arguments | anywhere, by type |
 
 ## Speed
 
@@ -274,6 +372,14 @@ from the other two rows and under different load, and the two differed — 7.2, 
 | Java 25 | 11.0 | 13.5 | 88 | 6.4 |
 | Rust | 5.7 | 7.8 | 187 | 5.8 |
 
+A further lane in each language, `audited`: a loop of operations of a sensitive effect, each passed by its audit
+(`k.after(pass(op))`) to a handler in place. Three runs, alternating with the tree before the audit was added, on one
+machine under a load of 4 to 5: Scala 41.5 – 47.5, Java 33.0 – 33.7, Rust 64.8 – 66.6 ns per operation. Each
+operation takes the rest as `k` at the audit and resumes it. In the same runs the other lanes were as before, within
+the noise between runs, except Rust's `reader3`: 7.7 – 7.9 before, 8.3 – 8.5 after; the same kernel with the bench
+built without the `audited` lane measured 7.7 – 7.8, so it is the code of the new lane in the one binary, not the
+kernel's path.
+
 Scala has a fifth lane, `embed`: the loop of `state`, its get and put a program of the state alone, bound in a
 program of a bigger declared row, so put into it at every bind. One measurement on that machine: about 14 – 16 ns
 per operation, next to 7 – 10 for `state`, where the program is generic in its row.
@@ -287,12 +393,13 @@ continuations and boxed values come from a thread-local pool (`rust/src/pool.rs`
 
 ```
 SPEC.md     the model: data, the machine's rules, laws, finalizers, rows, conformance
-scala/      scala-cli. src/Effects.scala the typed surface, Rows.scala the rows and places, Machine.scala the
-            loop, Branches.scala the macro that places the branches of a bound `if`, Messages.scala the compile
-            errors, src/std the effects (Family.scala the family's other names), src/wire the wire, src/bench;
-            test/ (munit)
+scala/      scala-cli. src/Effects.scala the typed surface, Rows.scala the rows and places, Audit.scala control
+            and audit, Machine.scala the loop, Branches.scala the macro that places the branches of a bound `if`,
+            Messages.scala the compile errors, src/std the effects (Family.scala the family's other names, Audit.scala
+            the trail), src/wire the wire, src/bench; test/ (munit)
 java/       javac, no build tool. src/okay/effects/java: Effects, Comp, Eff, Pure, Op, Handler, InPlace, K, Cell,
-            Step, Machine; std/, wire/, bench/; test/; negative/ the programs javac must refuse
+            Step, Machine; Sensitive, Audited, Interceptor, Pass, Audit; std/ (Trail the trail), wire/, bench/;
+            test/; negative/ the programs javac must refuse
 rust/       cargo, no dependencies. src/lib.rs the typed surface, machine.rs, erased.rs, val.rs, pool.rs,
             effects.rs and effects/, wire.rs and wire/; tests/; examples/ (bench, demo, transcripts)
 wire/       README.md the protocol; the transcripts; expected.txt
@@ -300,7 +407,7 @@ test.sh     everything
 ```
 
 `./test.sh` needs scala-cli, a JDK 25 or newer and cargo, and takes about a minute. It runs the three test suites
-(Scala 105 tests; Java 52 properties, 26 wire tests and 6 programs refused by javac; Rust 105 tests,
+(Scala 118 tests; Java 64 properties, 27 wire tests and 8 programs refused by javac; Rust 125 tests,
 compile-fail doctests among them), every worker against the 6 transcripts, and the nine host–worker pairs.
 
 ```
@@ -373,6 +480,19 @@ cd rust && cargo run --release --example bench
   runs its finalizers twice. The kernels differ at one rule ([SPEC.md](SPEC.md) §7): in Rust a handler that left
   still stops the operations of its type that a finalizer asks; Java's interceptor at a place leaves with
   `K.unwindKeeping`.
+- **A sensitive effect is said by its author, and the compiler holds to it where that is known.** In Scala a
+  `Sensitive` given outside the effect's companion holds only where it is in scope. In Java a program stepped
+  (`step`) whose sensitive operation reaches the top throws `NoHandler`: whoever steps a program is not shown it, and
+  javac does not refuse the `step`. In Rust a stepped program can be resumed by a `Reply` of the same answer type
+  taken from another operation (the limit above). In every language a cast (`asInstanceOf`, a raw type,
+  `unsafe`) defeats it, as it defeats the row.
+- **An interceptor goes on with `k.after`.** Written `proceed.flatMap(k)`, the rest is neither resumed nor unwound
+  when the handler that answers `proceed` leaves, and the finalizers of the program do not run ([SPEC.md](SPEC.md)
+  §7, rule 7). `observe`, `around` and the tests go on with `k.after`.
+- **Java's auditor of a state is an interceptor by class of a test effect, `Counter`.** `State<S>` has type
+  arguments: it is intercepted at its place only, at the front of the row; Scala and Rust audit the standard state.
+- **Rust's trail of answers is written per effect.** An answer's type has no `Debug` in the model, so a generic
+  observer sees the operation, not the answer; an auditor that records answers matches on the effect's variants.
 - **The wire** leaves out tables and data frames, direct-style far sides (`once`) and `continue` with a
   condition, `bytes`, `zlib`, `verify` and `describe`, TCP, TLS and in-process links (the list is at the end of
   [wire/README.md](wire/README.md)). The transport is a child process's standard input and output. What is

@@ -1,7 +1,7 @@
 package okay.effects.scala.wire
 
 import okay.effects.scala.*
-import okay.effects.scala.std.{Async, Emit, Throws}
+import okay.effects.scala.std.{Async, Audit, Emit, Throws}
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.nio.channels.{Channels, Pipe}
 import java.nio.charset.StandardCharsets.UTF_8
@@ -194,6 +194,21 @@ class WireTests extends munit.FunSuite:
       assertEquals(remote.run(Throws.run(Far.call("t:nothing"))).left.map(_.kind), Left("LookupError"))
       // the far side lives on
       assertEquals(remote.run(Throws.run(Far.call("t:add", Json.Int(2), Json.Int(3)))), Right(Json.Int(5)))
+    finally remote.close()
+
+  test("a far program audited by the host: its calls here are an effect like any, the trail theirs"):
+    type Traced[X] = (Failing + Audit + Foreign)[X]
+    val p: Json ! Traced = Far.program("shop:total", List(Json.Str("tea"), Json.Str("milk")))
+    def told(line: String): Unit ! Traced = Audit.record(line).into[Traced]
+    val traced = around[Foreign, Traced, Json](p)([X] => (op: Foreign[X], proceed: X ! Traced) => op match
+      case Foreign.Call(name, args) =>
+        val asked = s"$name ${args.mkString(",")}"
+        told(asked).flatMap(_ => proceed.flatMap(x => told(s"$asked → $x").map(_ => x))))
+    val remote = far()
+    try
+      assertEquals(remote.run(Throws.run(Audit.trail(Demo.answered(traced)))), Right((List(
+        "price_of \"tea\"", "price_of \"tea\" → 3", "price_of \"milk\"", "price_of \"milk\" → 2"),
+        List(Json.Int(5)))))
     finally remote.close()
 
   test("a run closes what it left open: when it ends, when it is left through an effect, when the host throws"):

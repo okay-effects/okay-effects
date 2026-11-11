@@ -74,12 +74,21 @@ fn random(r: &mut JRandom, depth: i32) -> Rc<T> {
 enum Log {
     Tell(i32, i32, Reply<()>),
 }
+impl Effect for Log {
+    type Kind = Plain;
+}
 enum Cell {
     Get(i32, Reply<i32>),
     Put(i32, i32, Reply<()>),
 }
+impl Effect for Cell {
+    type Kind = Plain;
+}
 enum Fail {
     Raise(i32, i32, Reply<i32>),
+}
+impl Effect for Fail {
+    type Kind = Plain;
 }
 
 type Tested = Comp<i32, eff![Log, Cell, Fail, Choose]>;

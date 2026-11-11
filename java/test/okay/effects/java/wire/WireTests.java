@@ -19,9 +19,14 @@ import java.util.function.Supplier;
 import java.util.stream.IntStream;
 import okay.effects.java.Comp;
 import okay.effects.java.Eff;
+import okay.effects.java.Effects;
+import okay.effects.java.Handler;
+import okay.effects.java.K;
+import okay.effects.java.Pure;
 import okay.effects.java.std.Async;
 import okay.effects.java.std.Emit;
 import okay.effects.java.std.Throws;
+import okay.effects.java.std.Trail;
 
 /** The wire: its codecs against their specifications' own examples, a worker against the transcripts of
  * {@code wire/}, and a host with a worker — in one process and in two — against {@code wire/expected.txt}.
@@ -313,6 +318,17 @@ final class WireTests {
       }
     });
 
+    test("a far program audited by the host: its calls here are an effect like any, the trail theirs", () -> {
+      try (Remote remote = far()) {
+        // the row of a far program audited here: its calls, the trail, its failures, the wire
+        Comp<Json, Eff<Foreign, Eff<Trail, Eff<Throws<Condition>, Eff<Far, Pure>>>>> p =
+            fit(under(Far.program("shop:total", List.of(Json.of("tea"), Json.of("milk")))));
+        same(Demo.attempt(remote, Trail.keep(Demo.answered(traced(p)))), new Throws.Ok<>(new Trail.Kept<>(List.of(
+            "price_of \"tea\"", "price_of \"tea\" → 3", "price_of \"milk\"", "price_of \"milk\" → 2"),
+            List.of(Json.of(5)))));
+      }
+    });
+
     test("a run closes what it left open: when it ends, when it is left through an effect, when the host throws",
         () -> {
           // a far side that has said all it will say: its hello, and that each of three streams is open
@@ -410,5 +426,26 @@ final class WireTests {
 
     System.out.println(failed == 0 ? "java wire: all passed" : "java wire: " + failed + " FAILED");
     System.exit(failed == 0 ? 0 : 1);
+  }
+
+  /** a far program's calls, each recorded when it is asked and when it is answered here */
+  static <A, R extends Eff<Foreign, ? extends Eff<Trail, ?>>> Comp<A, R> traced(Comp<A, ? super R> p) {
+    return intercept(Foreign.class, new Handler<Foreign, A, A, R>() {
+      public Comp<A, R> ret(A a) { return pure(a); }
+      public Comp<A, R> on(Foreign op, K<A, R> k) {
+        return switch (op) {
+          case Foreign.Call c -> {
+            String asked = c.name() + " " + String.join(",", c.args().stream().map(Json::text).toList());
+            yield WireTests.<R>told(asked).flatMap(d -> k.after(c, Effects.<Json, R>fit(perform(c))
+                .flatMap(x -> WireTests.<R>told(asked + " → " + x.text()).map(e -> x))));
+          }
+        };
+      }
+    }, p);
+  }
+
+  /** a line recorded to the trail, the effect after the first */
+  static <R extends Eff<?, ? extends Eff<Trail, ?>>> Comp<Void, R> told(String line) {
+    return fit(up(Trail.record(line)));
   }
 }

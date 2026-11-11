@@ -1,12 +1,13 @@
 //! A rough measure, the same in the three languages: nanoseconds an operation, the best of several rounds.
 //! `state`: get and put in a loop. `reader3`: an ask answered three handlers away. `choose`: a continuation taken
-//! twice at every step of a tree. `binds`: a loop of nothing but binds. `cargo run --release --example bench`.
+//! twice at every step of a tree. `binds`: a loop of nothing but binds. `audited`: a loop of operations of a
+//! sensitive effect, each passed by its audit to a handler in place. `cargo run --release --example bench`.
 
 use std::hint::black_box;
 use std::time::Instant;
 
 use okay_effects::effects::{Choose, Reader, State, Writer};
-use okay_effects::{Comp, Prog, eff, pure};
+use okay_effects::{Audited, Comp, Effect, Handler, Interceptor, K, Pass, Prog, Reply, Sensitive, eff, perform, pure};
 
 fn count(n: i64) -> Comp<i64, eff![State<i64>]> {
     if n == 0 {
@@ -29,6 +30,30 @@ fn binds(n: i64, sum: i64) -> Comp<i64, ()> {
     if n == 0 { pure(sum).boxed() } else { pure(1).flat_map(move |x: i64| binds(n - 1, sum + x)).boxed() }
 }
 
+/// a sensitive effect: a tick of a meter
+#[derive(Clone)]
+enum Meter {
+    Tick(Reply<i64>),
+}
+
+impl Effect for Meter {
+    type Kind = Sensitive;
+}
+
+fn meter(n: i64, sum: i64) -> Comp<i64, eff![Meter, Audited<Meter>]> {
+    if n == 0 { pure(sum).boxed() } else { perform(Meter::Tick).flat_map(move |x: i64| meter(n - 1, sum + x)).boxed() }
+}
+
+fn audited(n: i64) -> i64 {
+    let passing = Interceptor::new(pure, |op, pass: Pass<Meter, eff![Audited<Meter>]>, k: K<i64, _>| match op {
+        Meter::Tick(r) => k.after(r, pass.perform(Meter::Tick)),
+    });
+    let ticked = |_: &mut (), op| match op {
+        Meter::Tick(r) => r.give(1),
+    };
+    Handler::in_place((), |_, a| pure(a), ticked).handle_audited(passing.audit(meter(n, 0))).run()
+}
+
 fn measure<A>(name: &str, ops: u32, body: impl Fn() -> A) {
     let round = || {
         let start = Instant::now();
@@ -46,4 +71,5 @@ fn main() {
     measure("reader3", n as u32, || Reader::run(1, under3()).run());
     measure("choose", 1 << 18, || Choose::all(tree(18)).map(|all| all.len()).run());
     measure("binds", n as u32, || binds(n, 0).run());
+    measure("audited", n as u32, || audited(n));
 }

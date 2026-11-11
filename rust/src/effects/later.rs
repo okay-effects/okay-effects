@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use crate::{Handler, Has, K, Prog, Reply, eff, perform, pure};
+use crate::{Effect, Handler, Has, K, Plain, Prog, Reply, eff, perform, pure};
 
 /// The callback of an awaited answer.
 pub type Resume<X> = Rc<dyn Fn(X)>;
@@ -15,6 +15,10 @@ pub type Resume<X> = Rc<dyn Fn(X)>;
 pub enum Async {
     /// the answer travels without its type; `wait` gives it back
     Await(Box<dyn FnOnce(Resume<Box<dyn Any>>)>, Reply<Box<dyn Any>>),
+}
+
+impl Effect for Async {
+    type Kind = Plain;
 }
 
 impl Async {

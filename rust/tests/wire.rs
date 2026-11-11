@@ -9,10 +9,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 
-use okay_effects::effects::{Emit, Throws};
+use okay_effects::effects::{Audit, Emit, Throws};
 use okay_effects::json::Json;
 use okay_effects::wire::{Asking, Condition, Failing, Far, Foreign, Opening, Remote, Streaming};
-use okay_effects::{Comp, Handler, K, Prog, perform, pure};
+use okay_effects::{Comp, Handler, K, Prog, eff, perform, pure};
 
 /// the demonstration, which `cargo test` builds beside this test: target/<profile>/examples/demo
 fn demo() -> PathBuf {
@@ -169,6 +169,34 @@ fn a_program_of_the_far_side_asks_this_sides_handlers_as_often_as_they_resume_it
     };
     let sums = Handler::new(|sum| pure(vec![sum]), on_call).handle(p);
     assert_eq!(on(&far, sums), Ok(ints([2, 11, 11, 20])));
+}
+
+#[test]
+fn a_far_program_audited_by_the_host_its_calls_here_are_an_effect_like_any_the_trail_theirs() {
+    let far = far();
+    type Traced = eff![Foreign, Audit, Far, Throws<Condition>];
+    let p = Far::program::<Traced, _>("shop:total", vec![Json::str("tea"), Json::str("milk")], &["price_of"]);
+    let traced = |op, k: K<Json, Traced>| match op {
+        Foreign::Call(name, args, r) => {
+            let asked = format!("{name} {}", args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(","));
+            Audit::record(asked.clone()).then(move || {
+                let call = perform(move |r| Foreign::Call(name, args, r));
+                k.after(r, call.flat_map(move |x: Json| Audit::record(format!("{asked} → {x}")).map(move |_| x)))
+            })
+        }
+    };
+    let prices = |op, k: K<Json, eff![Audit, Far, Throws<Condition>]>| match op {
+        Foreign::Call(_, args, r) => k.resume(r, Json::Int(if args[0] == Json::str("tea") { 3 } else { 2 })),
+    };
+    let answered = Handler::new(pure, prices).handle(Handler::new(pure, traced).intercept(p));
+    let told = |all: [&str; 4]| all.iter().map(|line| line.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        on(&far, Audit::trail(answered)),
+        Ok((
+            told([r#"price_of "tea""#, r#"price_of "tea" → 3"#, r#"price_of "milk""#, r#"price_of "milk" → 2"#]),
+            Json::Int(5)
+        ))
+    );
 }
 
 #[test]

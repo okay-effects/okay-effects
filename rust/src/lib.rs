@@ -9,12 +9,15 @@
 //!
 //! ```
 //! use okay_effects::effects::Choose;
-//! use okay_effects::{Handler, Has, Prog, Reply, eff, perform, pure};
+//! use okay_effects::{Effect, Handler, Has, Plain, Prog, Reply, eff, perform, pure};
 //!
-//! // an effect: its operations, each with what answers it
+//! // an effect: its operations, each with what answers it; and its kind
 //! enum Account {
 //!     Deposit(i64, Reply<()>),
 //!     Balance(Reply<i64>),
+//! }
+//! impl Effect for Account {
+//!     type Kind = Plain;
 //! }
 //!
 //! fn deposit<R: Has<Account, I>, I>(amount: i64) -> impl Prog<(), R> {
@@ -148,6 +151,9 @@
 //! #     Deposit(i64, Reply<()>),
 //! #     Balance(Reply<i64>),
 //! # }
+//! # impl okay_effects::Effect for Account {
+//! #     type Kind = okay_effects::Plain;
+//! # }
 //! fn bank(p: impl Prog<i64, eff![Account]>) -> impl Prog<i64, eff![]> {
 //!     let answer = |balance: &mut i64, op| match op {
 //!         Account::Balance(r) => r.give(*balance),
@@ -164,6 +170,9 @@
 //! #     Deposit(i64, Reply<()>),
 //! #     Balance(Reply<i64>),
 //! # }
+//! # impl okay_effects::Effect for Account {
+//! #     type Kind = okay_effects::Plain;
+//! # }
 //! fn bank(p: impl Prog<i64, eff![Account]>) -> impl Prog<i64, eff![]> {
 //!     let answer = |balance: &mut i64, op| match op {
 //!         Account::Deposit(amount, r) => {
@@ -173,6 +182,161 @@
 //!         Account::Balance(r) => r.give("nothing"),
 //!     };
 //!     Handler::in_place(0, |_, a| pure(a), answer).handle(p)
+//! }
+//! ```
+//!
+//! A SENSITIVE EFFECT is handled only under its audit. `Pay` says so — `impl Effect for Pay { type Kind =
+//! Sensitive; }` —, and the one way to run a program of it is an interceptor's audit, then `handle_audited`:
+//!
+//! ```
+//! # use okay_effects::{Audited, Effect, Handler, Has, Interceptor, K, Pass, Prog, Reply, Sensitive};
+//! # use okay_effects::{eff, perform, pure};
+//! # enum Pay {
+//! #     Balance(Reply<i64>),
+//! # }
+//! # impl Effect for Pay {
+//! #     type Kind = Sensitive;
+//! # }
+//! # fn balance<R: Has<Pay, I>, I>() -> impl Prog<i64, R> {
+//! #     perform(Pay::Balance)
+//! # }
+//! # fn bank<A: 'static, R: 'static>() -> Handler<Pay, A, A, R> {
+//! #     Handler::in_place((), |_, a| pure(a), |_: &mut (), op| match op { Pay::Balance(r) => r.give(100) })
+//! # }
+//! type Outside = eff![Audited<Pay>];
+//! let passing = Interceptor::new(pure, |op, pass: Pass<Pay, Outside>, k: K<i64, Outside>| match op {
+//!     Pay::Balance(r) => k.after(r, pass.perform(Pay::Balance)),
+//! });
+//! let audited = passing.audit(balance::<eff![Pay, Audited<Pay>], _>());
+//! assert_eq!(bank().handle_audited(audited).run(), 100);
+//! ```
+//!
+//! Handled as a plain effect, it is refused:
+//!
+//! ```compile_fail,E0277
+//! # use okay_effects::{Audited, Effect, Handler, Has, Interceptor, K, Pass, Prog, Reply, Sensitive};
+//! # use okay_effects::{eff, perform, pure};
+//! # enum Pay {
+//! #     Balance(Reply<i64>),
+//! # }
+//! # impl Effect for Pay {
+//! #     type Kind = Sensitive;
+//! # }
+//! # fn balance<R: Has<Pay, I>, I>() -> impl Prog<i64, R> {
+//! #     perform(Pay::Balance)
+//! # }
+//! # fn bank<A: 'static, R: 'static>() -> Handler<Pay, A, A, R> {
+//! #     Handler::in_place((), |_, a| pure(a), |_: &mut (), op| match op { Pay::Balance(r) => r.give(100) })
+//! # }
+//! bank().handle(balance::<eff![Pay], _>()).run();
+//! ```
+//!
+//! and so is an interceptor of it that is not its audit:
+//!
+//! ```compile_fail,E0277
+//! # use okay_effects::{Audited, Effect, Handler, Has, Interceptor, K, Pass, Prog, Reply, Sensitive};
+//! # use okay_effects::{eff, perform, pure};
+//! # enum Pay {
+//! #     Balance(Reply<i64>),
+//! # }
+//! # impl Effect for Pay {
+//! #     type Kind = Sensitive;
+//! # }
+//! # fn balance<R: Has<Pay, I>, I>() -> impl Prog<i64, R> {
+//! #     perform(Pay::Balance)
+//! # }
+//! # fn bank<A: 'static, R: 'static>() -> Handler<Pay, A, A, R> {
+//! #     Handler::in_place((), |_, a| pure(a), |_: &mut (), op| match op { Pay::Balance(r) => r.give(100) })
+//! # }
+//! let on = |op, k: K<i64, eff![Pay]>| match op { Pay::Balance(r) => k.pass(Pay::Balance(r)) };
+//! let _ = Handler::new(pure, on).intercept(balance::<eff![Pay], _>());
+//! ```
+//!
+//! Its audited handler wants it audited:
+//!
+//! ```compile_fail,E0277
+//! # use okay_effects::{Audited, Effect, Handler, Has, Interceptor, K, Pass, Prog, Reply, Sensitive};
+//! # use okay_effects::{eff, perform, pure};
+//! # enum Pay {
+//! #     Balance(Reply<i64>),
+//! # }
+//! # impl Effect for Pay {
+//! #     type Kind = Sensitive;
+//! # }
+//! # fn balance<R: Has<Pay, I>, I>() -> impl Prog<i64, R> {
+//! #     perform(Pay::Balance)
+//! # }
+//! # fn bank<A: 'static, R: 'static>() -> Handler<Pay, A, A, R> {
+//! #     Handler::in_place((), |_, a| pure(a), |_: &mut (), op| match op { Pay::Balance(r) => r.give(100) })
+//! # }
+//! bank().handle_audited(balance::<eff![Pay], _>()).run();
+//! ```
+//!
+//! Outside its audit no program asks it: the row there has `Audited<Pay>`, not `Pay`.
+//!
+//! ```compile_fail,E0277
+//! # use okay_effects::{Audited, Effect, Handler, Has, Interceptor, K, Pass, Prog, Reply, Sensitive};
+//! # use okay_effects::{eff, perform, pure};
+//! # enum Pay {
+//! #     Balance(Reply<i64>),
+//! # }
+//! # impl Effect for Pay {
+//! #     type Kind = Sensitive;
+//! # }
+//! # fn balance<R: Has<Pay, I>, I>() -> impl Prog<i64, R> {
+//! #     perform(Pay::Balance)
+//! # }
+//! # fn bank<A: 'static, R: 'static>() -> Handler<Pay, A, A, R> {
+//! #     Handler::in_place((), |_, a| pure(a), |_: &mut (), op| match op { Pay::Balance(r) => r.give(100) })
+//! # }
+//! let asked = balance::<eff![Audited<Pay>], _>();
+//! ```
+//!
+//! What stands for it there is no effect: no handler of it is taken.
+//!
+//! ```compile_fail,E0277
+//! # use okay_effects::{Audited, Effect, Handler, Has, Interceptor, K, Pass, Prog, Reply, Sensitive};
+//! # use okay_effects::{eff, perform, pure};
+//! # enum Pay {
+//! #     Balance(Reply<i64>),
+//! # }
+//! # impl Effect for Pay {
+//! #     type Kind = Sensitive;
+//! # }
+//! # fn balance<R: Has<Pay, I>, I>() -> impl Prog<i64, R> {
+//! #     perform(Pay::Balance)
+//! # }
+//! # fn bank<A: 'static, R: 'static>() -> Handler<Pay, A, A, R> {
+//! #     Handler::in_place((), |_, a| pure(a), |_: &mut (), op| match op { Pay::Balance(r) => r.give(100) })
+//! # }
+//! type Outside = eff![Audited<Pay>];
+//! let passing = Interceptor::new(pure, |op, pass: Pass<Pay, Outside>, k: K<i64, Outside>| match op {
+//!     Pay::Balance(r) => k.after(r, pass.perform(Pay::Balance)),
+//! });
+//! let audited = passing.audit(balance::<eff![Pay, Audited<Pay>], _>());
+//! Handler::new(pure, |_: Audited<Pay>, k: K<i64, ()>| k.unwind().map(|_| 0)).handle(audited).run();
+//! ```
+//!
+//! Stepped, its operation is not shown to whoever steps the program:
+//!
+//! ```compile_fail,E0277
+//! # use okay_effects::{Audited, Effect, Handler, Has, Interceptor, K, Pass, Prog, Reply, Sensitive};
+//! # use okay_effects::{eff, perform, pure};
+//! # enum Pay {
+//! #     Balance(Reply<i64>),
+//! # }
+//! # impl Effect for Pay {
+//! #     type Kind = Sensitive;
+//! # }
+//! # fn balance<R: Has<Pay, I>, I>() -> impl Prog<i64, R> {
+//! #     perform(Pay::Balance)
+//! # }
+//! # fn bank<A: 'static, R: 'static>() -> Handler<Pay, A, A, R> {
+//! #     Handler::in_place((), |_, a| pure(a), |_: &mut (), op| match op { Pay::Balance(r) => r.give(100) })
+//! # }
+//! use okay_effects::Step;
+//! if let Step::Asked(asked) = balance::<eff![Pay], _>().step() {
+//!     let _ = asked.op::<Pay, _>();
 //! }
 //! ```
 
@@ -227,6 +391,45 @@ impl<R: Has<E, I> + Includes<T, Is>, E, T, I, Is> Includes<(E, T), (I, Is)> for 
 pub trait Closed {}
 
 impl Closed for () {}
+
+// -- WHAT AN EFFECT IS: its operations, an enum; and its kind, said by its author. A plain effect is handled by any
+// handler; a SENSITIVE one only under its audit (`Interceptor::audit`, then `Handler::handle_audited`).
+
+/// An effect: the enum of its operations, and its kind — `impl Effect for Pay { type Kind = Sensitive; }`.
+pub trait Effect: 'static {
+    type Kind: 'static;
+}
+
+/// The kind of an effect any handler takes.
+pub struct Plain;
+
+/// The kind of an effect handled only under its audit.
+pub struct Sensitive;
+
+/// A PLAIN EFFECT: what `handle`, `intercept` and `Asked::op` ask. A sensitive effect is not one, nor a type that
+/// does not say its kind.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a plain effect: it is sensitive, handled only under its audit, or says no kind",
+    note = "audit it, `Interceptor::new(..).audit(p)`, then handle it with `handle_audited`; an effect says its kind: \
+            `impl Effect for {Self} {{ type Kind = Plain; }}`"
+)]
+pub trait PlainEffect: Effect {}
+
+impl<E: Effect> PlainEffect for E where E::Kind: PlainKind {}
+
+/// The kind `Plain`: what a plain effect's kind is. Only `Plain` is one.
+#[diagnostic::on_unimplemented(
+    message = "a sensitive effect is handled only under its audit",
+    note = "audit it, `Interceptor::new(..).audit(p)`, then handle it with `handle_audited`"
+)]
+pub trait PlainKind {}
+
+impl PlainKind for Plain {}
+
+/// THE SENSITIVE EFFECT `S` AUDITED: what an audit leaves in the row outside it. It is no effect: no operation is of
+/// it, no program asks `S` where it stands, and only `handle_audited` takes it — the handler of `S`, reached by the
+/// audit's `Pass` alone.
+pub struct Audited<S>(PhantomData<fn() -> S>);
 
 /// A row, written as a list: `eff![State<i64>, Choose]` is `(State<i64>, (Choose, ()))`.
 #[macro_export]
@@ -565,8 +768,8 @@ pub struct Asked<A, R> {
 }
 
 impl<A: 'static, R: 'static> Asked<A, R> {
-    /// The operation, if it is of the effect `E`.
-    pub fn op<E: 'static, I>(&self) -> Option<&E>
+    /// The operation, if it is of the effect `E`. A sensitive one is not seen here: only its audit sees it.
+    pub fn op<E: PlainEffect, I>(&self) -> Option<&E>
     where
         R: Has<E, I>,
     {
@@ -613,12 +816,21 @@ impl<B: 'static, R: 'static> K<B, R> {
         Resumed { k: self.k.clone(), x: Val::new(x), of: PhantomData }
     }
 
-    /// The operation asked again outside, the rest resumed with what is answered there: interception, audit.
+    /// The operation asked again outside, the rest resumed with what is answered there: interception, audit. If
+    /// the handler that answers it leaves, the rest is unwound with it, as `after` says.
     pub fn pass<E: 'static, I>(&self, op: E) -> Passed<B, R>
     where
         R: Has<E, I>,
     {
         Passed { k: self.k.clone(), op: Val::new(op), of: PhantomData }
+    }
+
+    /// `p`, then the rest resumed with its value; `reply` is the operation's own. If `p` is left — the handler that
+    /// answers it unwinds what waits for it —, the rest is unwound there too, its handler staying, so its
+    /// finalizers run. What an interceptor goes on with: `k.after(r, proceed)`, where
+    /// `proceed.flat_map(|x| k.resume(r, x))` would leave the rest neither resumed nor unwound.
+    pub fn after<X: 'static, P: Prog<X, R>>(&self, _reply: Reply<X>, p: P) -> After<P, B, R> {
+        After { p, k: self.k.clone(), of: PhantomData }
     }
 
     /// The rest LEFT: its finalizers run, the innermost first, each where it was installed — the handlers of
@@ -648,7 +860,25 @@ impl<R: 'static> Start for Unwound<R> {
 
     fn start<Kn: Kont<()>>(self, k: Kn, m: &mut Machine) -> Node {
         m.push(k);
-        m.unwind(self.k)
+        m.unwind(self.k, false)
+    }
+}
+
+/// A computation, its value resuming a continuation (`K::after`).
+pub struct After<P, B, R> {
+    p: P,
+    k: Pieces,
+    of: PhantomData<fn() -> (B, R)>,
+}
+
+impl<P: Start<Row = R>, B: 'static, R: 'static> Start for After<P, B, R> {
+    type Row = R;
+    type Out = B;
+
+    fn start<Kn: Kont<B>>(self, k: Kn, m: &mut Machine) -> Node {
+        m.push(k);
+        m.push_resume(self.k);
+        self.p.start(Ret, m)
     }
 }
 
@@ -740,15 +970,33 @@ impl<E: 'static, A: 'static, B: 'static, R: 'static> Handler<E, A, B, R> {
         self
     }
 
-    /// The operations of `E` answered, every other one passing outside; `E` leaves the row.
-    pub fn handle<In: Has<E, I, Rest = R>, I, C: Prog<A, In>>(self, p: C) -> Handled<C, B, R> {
+    /// The operations of `E` answered, every other one passing outside; `E` leaves the row. A sensitive effect is
+    /// refused: `handle_audited` takes it, under its audit.
+    pub fn handle<In: Has<E, I, Rest = R>, I, C: Prog<A, In>>(self, p: C) -> Handled<C, B, R>
+    where
+        E: PlainEffect,
+    {
+        self.handled(p)
+    }
+
+    fn handled<In: 'static, C: Prog<A, In>>(self, p: C) -> Handled<C, B, R> {
         Handled { mark: Rc::new(self.mark), state: self.state, body: p, of: PhantomData }
     }
 
-    /// `handle`, the effect kept in the row: a clause may ask the operation again — interception, audit.
+    /// THE SENSITIVE EFFECT `E` HANDLED, under its audit only: `Audited<E>` taken out of the row.
+    pub fn handle_audited<In: Has<Audited<E>, I, Rest = R>, I, C: Prog<A, In>>(self, p: C) -> Handled<C, B, R>
+    where
+        E: Effect<Kind = Sensitive>,
+    {
+        self.handled(p)
+    }
+
+    /// `handle`, the effect kept in the row: a clause may ask the operation again — interception, audit. A
+    /// sensitive effect is refused: its interceptor is its audit.
     pub fn intercept<I, C: Prog<A, R>>(self, p: C) -> Handled<C, B, R>
     where
         R: Has<E, I>,
+        E: PlainEffect,
     {
         let mark = Mark { keeps: true, ..self.mark };
         Handled { mark: Rc::new(mark), state: self.state, body: p, of: PhantomData }
@@ -786,4 +1034,59 @@ fn written<S: Clone + 'static>(state: &mut State) -> &mut S {
 fn taken<S: Clone + 'static>(state: State) -> S {
     let state = state.downcast::<S>().expect("the state of this handler");
     Rc::try_unwrap(state).unwrap_or_else(|shared| (*shared).clone())
+}
+
+// -- CONTROL AND AUDIT
+
+/// AN INTERCEPTOR of the sensitive effect `S`, in a program of an `A`, the row outside its audit `T`: each operation,
+/// the way on past it, and the rest. Its clause may tell (record, to a trail outside), pass the operation on as it is
+/// or another one (`pass.perform`), change the answer, or refuse — fail by an effect of `T`, or end the program with
+/// a `B` of its own (`k.unwind()` first). It goes on by `k.after(r, c)`.
+pub struct Interceptor<S, A, B, T> {
+    handler: Handler<S, A, B, T>,
+}
+
+impl<S: Effect<Kind = Sensitive>, A: 'static, B: 'static, T: 'static> Interceptor<S, A, B, T> {
+    pub fn new<P: Prog<B, T>, Q: Prog<B, T>>(
+        ret: impl Fn(A) -> P + 'static,
+        on: impl Fn(S, Pass<S, T>, K<B, T>) -> Q + 'static,
+    ) -> Self {
+        Interceptor { handler: Handler::new(ret, move |op, k| on(op, Pass(PhantomData), k)) }
+    }
+
+    /// `S` AUDITED for `p`, a program of `S` and `T`: each of its operations to the clause, which runs outside the
+    /// audit, in `T`. `T` has `Audited<S>`, where no program asks `S`.
+    pub fn audit<I, C: Prog<A, (S, T)>>(self, p: C) -> Handled<C, B, T>
+    where
+        T: Has<Audited<S>, I>,
+    {
+        self.handler.handled(p)
+    }
+}
+
+/// THE WAY ON past an audit of `S`, in the row `T` outside it: an operation asked of the handler `handle_audited`
+/// put. Only an interceptor is given one.
+pub struct Pass<S, T>(PhantomData<fn() -> (S, T)>);
+
+impl<S, T> Clone for Pass<S, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<S, T> Copy for Pass<S, T> {}
+
+impl<S: 'static, T: 'static> Pass<S, T> {
+    pub fn perform<X: 'static>(&self, operation: impl FnOnce(Reply<X>) -> S) -> Ask<S, X, T> {
+        Ask { op: operation(Reply(PhantomData)), of: PhantomData }
+    }
+}
+
+/// Each operation of `E` in `p` shown to `see` — a program of the row, run before the operation goes on as it is: a
+/// trace, a count, a trail. Nothing of the program changes. The operation waits while `see` runs, so it is `Clone`.
+pub fn observe<E: PlainEffect + Clone, R: Has<E, I>, I, A: 'static, D: Prog<(), R>>(
+    see: impl Fn(&E) -> D + 'static,
+    p: impl Prog<A, R>,
+) -> impl Prog<A, R> {
+    let on = move |op: E, k: K<A, R>| see(&op).then(move || k.pass(op));
+    Handler::new(pure, on).intercept(p)
 }

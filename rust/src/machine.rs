@@ -124,7 +124,7 @@ impl<A: 'static, K: Kont<A>> Frame for Waits<K, A> {
     }
 }
 
-/// a frame that resumes a continuation with the value: an operation passed outside (`K::pass`)
+/// a frame that resumes a continuation with the value: an operation passed outside (`K::pass`, `K::after`)
 struct Resumes(Pieces);
 
 impl Frame for Resumes {
@@ -134,6 +134,13 @@ impl Frame for Resumes {
 
     fn again(&self, x: Val, _: &mut Machine) -> Node {
         Node::Resume(self.0.clone(), x)
+    }
+
+    /// passed by an unwinding: the continuation it would resume is unwound too, its handler staying — the one that
+    /// left is outside it —, and the unwinding goes on after
+    fn left(&self, to: &To, m: &mut Machine) -> Option<Node> {
+        m.link(Unwinding(to.clone()));
+        Some(m.unwind(self.0.clone(), true))
     }
 }
 
@@ -313,15 +320,15 @@ impl Machine {
 
     /// A CONTINUATION UNWOUND: its levels are put back over the end of the unwinding — a frame of the top level,
     /// which what waits for the unwinding is under — and walked. What comes out of a level on to the one below
-    /// it goes on unwinding.
-    pub fn unwind(&mut self, k: Pieces) -> Node {
+    /// it goes on unwinding. `kept`: its handler stays (`K::after`), for the one that left is outside it.
+    pub fn unwind(&mut self, k: Pieces, kept: bool) -> Node {
         let to = To::new(());
         self.link(End(to.clone()));
         for (i, level) in k.iter().enumerate() {
             if i > 0 {
                 self.link(Unwinding(to.clone()));
             }
-            let below = replace(&mut self.top, level.left(i == 0, &to));
+            let below = replace(&mut self.top, level.left(i == 0 && !kept, &to));
             self.under.push(below);
         }
         // the frames are this path's alone now, if nobody else holds `k`

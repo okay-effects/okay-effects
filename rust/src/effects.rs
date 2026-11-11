@@ -3,7 +3,7 @@
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{Comp, Handler, Has, K, Never, Prog, Reply, perform, pure};
+use crate::{Comp, Effect, Handler, Has, K, Never, Plain, Prog, Reply, perform, pure};
 
 mod emit;
 mod later;
@@ -12,9 +12,14 @@ pub use emit::{Emit, Pull};
 pub use later::{Async, Resume, Timers};
 
 /// STATE.
+#[derive(Clone)]
 pub enum State<S> {
     Get(Reply<S>),
     Put(S, Reply<()>),
+}
+
+impl<S: 'static> Effect for State<S> {
+    type Kind = Plain;
 }
 
 impl<S: Clone + 'static> State<S> {
@@ -46,6 +51,10 @@ impl<S: Clone + 'static> State<S> {
 /// READER: a value of the surroundings.
 pub enum Reader<V> {
     Ask(Reply<V>),
+}
+
+impl<V: 'static> Effect for Reader<V> {
+    type Kind = Plain;
 }
 
 impl<V: Clone + 'static> Reader<V> {
@@ -81,6 +90,10 @@ pub enum Writer<W> {
     Tell(W, Reply<()>),
 }
 
+impl<W: 'static> Effect for Writer<W> {
+    type Kind = Plain;
+}
+
 impl<W: Clone + 'static> Writer<W> {
     pub fn tell<R: Has<Self, I>, I>(w: W) -> impl Prog<(), R> {
         perform(|r| Writer::Tell(w, r))
@@ -101,6 +114,10 @@ impl<W: Clone + 'static> Writer<W> {
 /// failure waits while they run, so a handler asks that it is `Clone`.
 pub enum Throws<E> {
     Raise(E, Reply<Never>),
+}
+
+impl<E: 'static> Effect for Throws<E> {
+    type Kind = Plain;
 }
 
 impl<E: 'static> Throws<E> {
@@ -139,9 +156,14 @@ impl<E: 'static> Throws<E> {
 
 /// CHOOSE: the rest of the program is resumed once for every value — a continuation taken many times. With no
 /// value it is left: unwound.
+#[derive(Clone)]
 pub enum Choose {
     /// one of so many: which
     Among(usize, Reply<usize>),
+}
+
+impl Effect for Choose {
+    type Kind = Plain;
 }
 
 impl Choose {
@@ -216,6 +238,10 @@ pub enum Fresh {
     Next(Reply<i64>),
 }
 
+impl Effect for Fresh {
+    type Kind = Plain;
+}
+
 impl Fresh {
     pub fn fresh<R: Has<Self, I>, I>() -> impl Prog<i64, R> {
         perform(Fresh::Next)
@@ -237,6 +263,10 @@ pub enum Clock {
     Now(Reply<i64>),
 }
 
+impl Effect for Clock {
+    type Kind = Plain;
+}
+
 impl Clock {
     pub fn now<R: Has<Self, I>, I>() -> impl Prog<i64, R> {
         perform(Clock::Now)
@@ -255,5 +285,34 @@ impl Clock {
             Clock::Now(r) => r.give(time()),
         };
         Handler::in_place((), |_, a| pure(a), answer).handle(p)
+    }
+}
+
+/// THE AUDIT TRAIL: a line recorded. An ordinary effect, handled outside the interceptors that record to it — so the
+/// trail is a value beside the program's, and another handler may send the lines anywhere.
+pub enum Audit {
+    Record(String, Reply<()>),
+}
+
+impl Effect for Audit {
+    type Kind = Plain;
+}
+
+impl Audit {
+    pub fn record<R: Has<Self, I>, I>(line: impl Into<String>) -> impl Prog<(), R> {
+        let line = line.into();
+        perform(move |r| Audit::Record(line, r))
+    }
+
+    /// The lines recorded, in order, with the value. Kept in place: outside a handler that resumes many times it is
+    /// one trail through all the paths; inside it, each path has its own.
+    pub fn trail<R: Has<Self, I>, I, A: 'static>(p: impl Prog<A, R>) -> impl Prog<(Vec<String>, A), R::Rest> {
+        let answer = |lines: &mut Vec<String>, op| match op {
+            Audit::Record(line, r) => {
+                lines.push(line);
+                r.give(())
+            }
+        };
+        Handler::in_place(Vec::new(), |lines, a| pure((lines, a)), answer).handle(p)
     }
 }
