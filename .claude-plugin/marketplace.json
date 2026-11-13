@@ -1,0 +1,17 @@
+{
+  "name": "okay-effects",
+  "description": "Skills for writing code with algebraic effects using the okay-effects libraries",
+  "owner": {
+    "name": "okay-effects",
+    "url": "https://okay-effects.github.io/"
+  },
+  "plugins": [
+    {
+      "name": "okay-effects",
+      "source": "./plugins/okay-effects",
+      "description": "Write code with algebraic effects: effects as the data model, handlers as implementations, one run",
+      "category": "development",
+      "tags": ["effects", "algebraic-effects", "handlers", "scala", "java", "rust", "kotlin", "typescript"]
+    }
+  ]
+}

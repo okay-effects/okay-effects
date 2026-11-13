@@ -8,6 +8,24 @@ language working with every worker of another. Each has the same standard effect
 It is part of the [okay-effects](https://okay-effects.github.io/) family: the random programs and the wire are the
 family's. The repository is <https://github.com/okay-effects/okay-effects>: public, Apache-2.0 ([LICENSE](LICENSE)).
 
+## A skill for coding agents
+
+This repository is also a Claude Code plugin marketplace. Its plugin `okay-effects` holds one skill, `effects`, that
+teaches an agent to write code with algebraic effects using the okay-effects libraries in every language of the
+family: the model, how to design with it, a quick start per library, checking, and common mistakes. In Claude Code:
+
+```
+/plugin marketplace add okay-effects/okay-effects
+/plugin install okay-effects@okay-effects
+```
+
+or from a shell: `claude plugin marketplace add okay-effects/okay-effects` and
+`claude plugin install okay-effects@okay-effects` (on Claude Code 2.1.275 or later, in one step:
+`/plugin install okay-effects --marketplace okay-effects/okay-effects`). The skill then loads by itself when the
+task fits, or runs as `/okay-effects:effects`. For other agents it is plain markdown: point them at
+[plugins/okay-effects/skills/effects/SKILL.md](plugins/okay-effects/skills/effects/SKILL.md), which links to the
+rest.
+
 ## The model
 
 The whole of it is in [SPEC.md](SPEC.md). In short:

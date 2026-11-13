@@ -1,0 +1,13 @@
+{
+  "name": "okay-effects",
+  "version": "0.1.0",
+  "description": "Teaches a coding agent to write code with algebraic effects using the okay-effects libraries",
+  "author": {
+    "name": "okay-effects",
+    "url": "https://okay-effects.github.io/"
+  },
+  "homepage": "https://github.com/okay-effects/okay-effects/tree/master/plugins/okay-effects",
+  "repository": "https://github.com/okay-effects/okay-effects",
+  "license": "Apache-2.0",
+  "keywords": ["effects", "algebraic-effects", "handlers", "continuations", "audit"]
+}
