@@ -347,6 +347,20 @@ class Properties extends munit.FunSuite:
     val missing = compileErrors("(pure(1): Int ! Chosen).into[Choose + Reader % Int]")
     assert(missing.contains("the effect State % Int is not in the row Choose + Reader % Int"), missing)
 
+  test("an effect of a row is in the row with effects added: Has of an abstract row lifts to R + State"):
+    def step[R[_]: Has[Emit % Int]](x: Int): Unit ! R + State % Int =
+      for s <- State.get[Int]; _ <- State.put(s + x); _ <- Emit.send(s + x) yield ()
+    def sums[R[_]: Has[Emit % Int]](xs: List[Int]): Unit ! R =
+      val each: Unit ! R + State % Int = xs.foldLeft(unit[R + State % Int])((p, x) => p.flatMap(_ => step[R](x)))
+      State.run(0)(each).map(_ => ())
+    assertEquals(run(Emit.collect(sums[Emit % Int](List(1, 2, 3, 4)))), (List(1, 3, 6, 10), ()))
+    type App[X] = (Emit % Int + Reader % Int)[X]
+    assertEquals(run(Reader.run(0)(Emit.collect(sums[App](List(5, 5))))), (List(5, 10), ()))
+    val twice = compileErrors("def g[R[_]: Has[Emit % Int]]: Unit ! R + State % Int + Choose = Writer.tell(1)")
+    assert(twice.contains("is not in the row R + State % Int + Choose"), twice)
+    val known = compileErrors("val k: Unit ! Emit % Int + State % Int = Writer.tell(1)")
+    assert(known.contains("is not in the row Emit % Int + State % Int"), known)
+
   test("a stream mapped: a new stream in the row, wherever the old one was"):
     type Counted[X] = (Emit % Int + State % Int)[X]
     val p: Unit ! Counted = for _ <- Emit.send(1); _ <- State.put(1); _ <- Emit.send(2) yield ()

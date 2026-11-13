@@ -34,8 +34,16 @@ infix type +[R[_], E[_]] = [X] =>> Sum[R, E, X]
 /** the effect `F` with its parameter `S`: `State % Int`, its operations `State[Int, X]` */
 infix type %[F[_, _], S] = [X] =>> F[S, X]
 
+/** `E` is in `R` as far as lifting knows: what a `Has` of an abstract row gives, and the rows with effects added
+ * after it. No given says it is missing, so a search for it inside another fails quietly */
+sealed trait Lift[E[_], R[_]]:
+  private[scala] def place: At[E, R]
+
+object Lift:
+  given deeper[E[_], R[_], G[_]](using in: Lift[E, R]): Lift[E, R + G] = In.lift(in)
+
 /** `E` is in `R`: its place there, found by the compiler; missing, a compile error naming both */
-sealed trait In[E[_], R[_]]:
+sealed trait In[E[_], R[_]] extends Lift[E, R]:
   private[scala] def place: At[E, R]
 
 /** `E` is in `R`, and `R` without it is `Rest`: what a handler takes */
@@ -214,8 +222,17 @@ trait InitPlace:
   /** one further in than the last, `G` */
   given init[E[_], R[_], G[_], Rest[_]](using at: Place[E, R, Rest]): Place[E, R + G, Rest + G] = Place.Init(at)
 
-object In extends InMissing:
+object In extends InLifted:
   given found[E[_], R[_], Rest[_]](using at: Place[E, R, Rest]): In[E, R] = at
+
+  /** `E` in `R + G`, one further in than in `R` */
+  private[scala] def lift[E[_], R[_], G[_]](in: Lift[E, R]): In[E, R + G] = in.place match
+    case p: Place[E, R, rest] => Place.Init[E, R, G, rest](p)
+
+trait InLifted extends InMissing:
+  /** `E` in a row with effects added after one where it is known: `R + State % Int` under `R[_]: Has[Emit % Int]`.
+   * Below `found`, so a row written out finds its place by itself */
+  given lifted[E[_], R[_], G[_]](using in: Lift[E, R]): In[E, R + G] = In.lift(in)
 
 trait InMissing:
   /** no place found: the error says which effect and which row, as they are written */
