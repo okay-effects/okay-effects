@@ -7,18 +7,25 @@ styles over one machine:
 - `okay.resumable` — direct style: plain Java methods whose effects are checked exceptions (`throws Prices`),
   turned into resumable code by a Gradle/Maven bytecode plugin; handlers are the same `okay.rows` handlers.
 
-Dependency: not published to a public repository yet (`dev.okay:okay-java:0.2.0-SNAPSHOT`, built with
-`./gradlew publishToMavenLocal`; it needs `dev.okay:okay-kernel-api:0.2.0-SNAPSHOT` from okay-kernel in `~/.m2`
-too). The resumable plugin is taken as a composite build until it is published:
+Dependency: released 0.1.0, `io.github.okay-effects:okay-java:0.1.0` (also `okay-java-resumable`,
+`okay-java-spring-boot`) from https://okay-effects.github.io/okay-java/maven; its one dependency, `okay-kernel-api`,
+from https://okay-effects.github.io/okay-kernel/maven. The resumable Gradle plugin, `io.github.okay-effects.resumable`:
 
 ```kotlin
 // settings.gradle.kts
-pluginManagement { includeBuild("<okay-java>/resumable/gradle-plugin") }
-includeBuild("<okay-java>")
+pluginManagement { repositories { gradlePluginPortal(); maven("https://okay-effects.github.io/okay-java/maven") } }
 // build.gradle.kts
-plugins { id("dev.okay.resumable") }          // adds dev.okay:okay-java-resumable to implementation
-repositories { mavenLocal(); mavenCentral(); maven("https://okay-effects.github.io/okay/maven") }  // last: okay-audit
+plugins { id("io.github.okay-effects.resumable") version "0.1.0" }   // adds okay-java-resumable to implementation
+repositories {
+    mavenCentral()
+    maven("https://okay-effects.github.io/okay-java/maven")
+    maven("https://okay-effects.github.io/okay-kernel/maven")
+    maven("https://okay-effects.github.io/okay/maven")               // okay-audit, the check of forbid
+}
 ```
+
+Maven: `io.github.okay-effects:okay-java-resumable-maven-plugin:0.1.0` (goals `transform`, `transform-test`), the
+three repositories as `<repositories>` and `<pluginRepositories>` both.
 
 ## okay.rows
 
