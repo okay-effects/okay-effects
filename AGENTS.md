@@ -143,7 +143,7 @@ run(Audit.trail(handleAudited(audit(logged[Outside, String])(checkout[Outside + 
 - README and SPEC: https://github.com/okay-effects/okay-effects (`README.md`, `SPEC.md`, `wire/README.md`).
 - The cross-language skill lives in this repository: `/plugin marketplace add okay-effects/okay-effects`, then
   `/plugin install okay-effects@okay-effects`.
-- JVM build-time boundary checks: okay-audit, `io.github.okay-effects:okay-audit_3:0.1.3` from
+- JVM build-time boundary checks: okay-audit, `io.github.okay-effects:okay-audit_3:0.1.4` from
   https://okay-effects.github.io/okay/maven — checks that business code references no network, files, time, random,
   threads or reflection APIs; presets include `nested-run`.
 
