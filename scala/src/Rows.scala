@@ -1,5 +1,7 @@
 package okay.effects.scala
 
+import scala.util.NotGiven
+
 /*
  * THE ROWS. An effect is the enum of its operations, a type constructor: `Choose`, `State % Int`. A row is one
  * too: an effect, `Pure`, or `R + E` — the effects in order, left to right. A program of an `A` over the row `R`
@@ -281,6 +283,34 @@ object Sub extends SubMore:
       case first @ Place.First() => r.to(first.alone)
       case Place.Only() => null
 
+  /** `R` into `S + G`, through `R` into `S`: every place one further in. How a program of an abstract row is put
+   * into that row with effects added after it (`Prefix`) */
+  final class Shifted[R[_], S[_], G[_]](inner: Sub[R, S]) extends Sub[R, S + G]:
+    private[scala] def to[E[_]](at: At[E, R]): At[E, S + G] = inner.to(at) match
+      case null => null
+      case p: Place[E, S, rest] => Place.Init[E, S, G, rest](p)
+    private[scala] def before[T[_]](next: Sub[S + G, T]): Sub[R, T] = Both(this, next)
+
+  /** `R` IS THE ROW AT THE START OF `S`: `S` is `R` with effects added after it — `R + G`, `R + G + H`. Found
+   * before a row of one (`one`), which would take an abstract row `R` for an effect at its place `Only`: an
+   * operation of `R` at any other place would have no handler */
+  sealed trait Prefix[R[_], S[_]]:
+    def sub: Sub[R, S]
+
+  object Prefix extends PrefixFurther:
+    given here[R[_]]: Prefix[R, R] = new Prefix[R, R]:
+      def sub: Sub[R, R] = Same()
+
+  /** `G` is `R`: an effect added after itself is no row with effects added — its last place is the one found */
+  sealed trait Twice[R[_], G[_]]
+  object Twice:
+    given itself[R[_]]: Twice[R, R] = new Twice[R, R] {}
+
+  trait PrefixFurther:
+    given further[R[_], S[_], G[_]](using p: Prefix[R, S], other: NotGiven[Twice[R, G]]): Prefix[R, S + G] =
+      new Prefix[R, S + G]:
+        val sub: Sub[R, S + G] = Shifted(p.sub)
+
   /** a renaming, then another, kept as two: the first's row is known by no parts (`Exchanged`) */
   final class Both[R[_], S[_], T[_]](first: Sub[R, S], second: Sub[S, T]) extends Sub[R, T]:
     private[scala] def to[E[_]](at: At[E, R]): At[E, T] =
@@ -327,13 +357,17 @@ object Sub extends SubMore:
         if in == null then null else Place.Init(in)
     private[scala] def before[T[_]](next: Sub[S + E, T]): Sub[R, T] = Both(this, next)
 
-trait SubMore extends SubOne:
+trait SubMore extends SubPrefix:
   given pure[S[_]]: Sub[Pure, S] = Sub.OfNone()
 
   /** the row of a `pure` or a `unit` that nothing said, in a branch beside words (Branches.scala) */
   given unsaid[S[_]]: Sub[Unsaid, S] = Sub.OfNone()
 
   given more[R[_], E[_], S[_]](using r: Sub[R, S], e: In[E, S]): Sub[R + E, S] = Sub.More(r, e.place)
+
+trait SubPrefix extends SubOne:
+  /** an abstract row into itself with effects added after it: `R` into `R + State % Int` */
+  given prefix[R[_], S[_]](using p: Sub.Prefix[R, S]): Sub[R, S] = p.sub
 
 trait SubOne:
   /** an effect alone: its place is the row of one */

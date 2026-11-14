@@ -361,6 +361,20 @@ class Properties extends munit.FunSuite:
     val known = compileErrors("val k: Unit ! Emit % Int + State % Int = Writer.tell(1)")
     assert(known.contains("is not in the row Emit % Int + State % Int"), known)
 
+  test("a program of the abstract row R bound in R + State: put there with its places one further in, any row R"):
+    def emitAll[R[_]](xs: List[Int])(using In[Emit % Int, R]): Unit ! R = Emit.sendAll[Int, R](xs)
+    def plain[R[_]: Has[Emit % Int]](x: Int): Unit ! R + State % Int =
+      for s <- State.get[Int]; _ <- State.put(s + x); _ <- emitAll[R](List(s + x)) yield ()
+    def all[R[_]: Has[Emit % Int]](xs: List[Int]): Unit ! R =
+      State.run(0)(xs.foldLeft(unit[R + State % Int])((p, x) => p.flatMap(_ => plain[R](x)))).map(_ => ())
+    assertEquals(run(Emit.collect(all[Emit % Int](List(1, 2, 3)))), (List(1, 3, 6), ()))
+    type App[X] = (Reader % Int + Emit % Int)[X]
+    assertEquals(run(Reader.run(0)(Emit.collect(all[App](List(2, 2))))), (List(2, 4), ()))
+    // an effect added after itself is not a row with effects added: its last place, as ever
+    val one: Int ! State % Int = State.get[Int]
+    val twice: Int ! State % Int + State % Int = one.into
+    assertEquals(run(State.run(1)(State.run(2)(twice))), (1, (2, 2)))
+
   test("a stream mapped: a new stream in the row, wherever the old one was"):
     type Counted[X] = (Emit % Int + State % Int)[X]
     val p: Unit ! Counted = for _ <- Emit.send(1); _ <- State.put(1); _ <- Emit.send(2) yield ()
