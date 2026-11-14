@@ -38,9 +38,10 @@ cs launch -r https://okay-effects.github.io/okay/maven io.github.okay-effects:ok
 ```
 
 `layer` is `business`, `handlers`, `runtime` or `untracked`; paths are relative to the manifest. Optional:
-`"rules": "default, state, nested-run"`, `"allowlist"`, `"types"` (only first-order data crosses into business; okay-http's immutable `Bytes` counts as data by default,
-a raw `byte[]` never).It writes `report.txt` and `report.json`; exit 0 = pass, 1 = findings, 2 = malformed input. Put it in CI and keep
-business packages in the `business` layer, handlers in `handlers`.
+`"rules": "default, state, nested-run"`, `"allowlist"`, `"types"` (only first-order data crosses into business;
+okay-http's immutable `Bytes` counts as data by default, a raw `byte[]` never). It writes `report.txt` and
+`report.json`; exit 0 = pass, 1 = findings, 2 = malformed input. Put it in CI and keep business packages in the
+`business` layer, handlers in `handlers`.
 
 ## okay-java: guard and forbid
 
