@@ -15,13 +15,13 @@ named after the standard effects (`state`, `reader`, `writer`, `clock`, `fresh`,
 ```scala
 // sbt
 resolvers += "okay" at "https://okay-effects.github.io/okay/maven"
-libraryDependencies += "io.github.okay-effects" %% "okay-audit" % "0.1.0"
+libraryDependencies += "io.github.okay-effects" %% "okay-audit" % "0.1.1"
 ```
 
 As a CLI from any build (Maven `exec`, Gradle `JavaExec`, a CI step):
 
 ```sh
-cs launch -r https://okay-effects.github.io/okay/maven io.github.okay-effects:okay-audit_3:0.1.0 \
+cs launch -r https://okay-effects.github.io/okay/maven io.github.okay-effects:okay-audit_3:0.1.1 \
   -M okay.audit.Main -- --manifest audit.json --report build/audit
 ```
 
