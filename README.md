@@ -414,7 +414,8 @@ SPEC.md     the model: data, the machine's rules, laws, finalizers, rows, confor
 scala/      scala-cli. src/Effects.scala the typed surface, Rows.scala the rows and places, Audit.scala control
             and audit, Machine.scala the loop, Branches.scala the macro that places the branches of a bound `if`,
             Messages.scala the compile errors, src/std the effects (Family.scala the family's other names, Audit.scala
-            the trail), src/wire the wire, src/bench; test/ (munit)
+            the trail), src/wire the wire, src/bench, src/examples (Fibonacci: an endless
+            generator, running sums with State added to the row, recursion with no stack limit); test/ (munit)
 java/       javac, no build tool. src/okay/effects/java: Effects, Comp, Eff, Pure, Op, Handler, InPlace, K, Cell,
             Step, Machine; Sensitive, Audited, Interceptor, Pass, Audit; std/ (Trail the trail), wire/, bench/;
             test/; negative/ the programs javac must refuse
@@ -425,11 +426,12 @@ test.sh     everything
 ```
 
 `./test.sh` needs scala-cli, a JDK 25 or newer and cargo, and takes about a minute. It runs the three test suites
-(Scala 118 tests; Java 64 properties, 27 wire tests and 8 programs refused by javac; Rust 125 tests,
+(Scala 123 tests; Java 64 properties, 27 wire tests and 8 programs refused by javac; Rust 125 tests,
 compile-fail doctests among them), every worker against the 6 transcripts, and the nine host–worker pairs.
 
 ```
 cd scala && scala-cli run . --server=false --main-class okay.effects.scala.bench.benchmark
+cd scala && scala-cli run . --server=false --main-class okay.effects.scala.examples.fibonacciDemo
 java -cp java/out okay.effects.java.bench.Bench          # after ./test.sh, which compiles into java/out
 cd rust && cargo run --release --example bench
 ```
