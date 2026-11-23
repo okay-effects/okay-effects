@@ -28,6 +28,10 @@ rest.
 
 ## The model
 
+The picture and the vocabulary of the whole family — the invariants, one name for one thing in every library, how
+types, data, direct style, parameters and exceptions are one model — are in [CONCEPT.md](CONCEPT.md); the model
+exactly in [SPEC.md](SPEC.md).
+
 The whole of it is in [SPEC.md](SPEC.md). In short:
 
 ```

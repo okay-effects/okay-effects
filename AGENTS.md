@@ -5,7 +5,8 @@
 okay-effects is algebraic effects and handlers as one small model in three kernels — Scala 3, Java 25, Rust —
 checked to be one (same properties, same TCK digest, one wire). A program is data that asks operations; handlers
 answer; one loop runs it. It is a reference model: small, dependency-free, read in an afternoon
-([SPEC.md](SPEC.md) is the whole model).
+([SPEC.md](SPEC.md) is the whole model). [CONCEPT.md](CONCEPT.md) is the picture and the
+family's vocabulary: one name for one thing in every library.
 
 Getting it: no artifact is published; the README presents it as source in https://github.com/okay-effects/okay-effects.
 `scala/` builds with scala-cli (Scala 3.3.8), `java/` with plain `javac` (JDK 25+), `rust/` is the cargo crate
