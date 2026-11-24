@@ -42,7 +42,7 @@ Standard effects (from getting-started; Scala 3.9 syntax — on 3.3 LTS write `R
 def greet[R[_]: {Has[Reader % String], Has[State % Int]}]: String ! R =
   for name <- ask[String, R]; n <- get[Int, R]; _ <- put[Int, R](n + 1) yield s"hello, $name (#${n + 1})"
 type App = Reader % String + State % Int
-assert(run(state(0)(reader("Ann")(greet[App]))) == (1, "hello, Ann (#1)"))
+assert(run(State.run(0)(Reader.run("Ann")(greet[App]))) == (1, "hello, Ann (#1)"))
 ```
 
 Multi-shot: a general `Handler` gets `k: X => B ! Rest`, callable any number of times (tour §4):

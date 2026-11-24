@@ -100,20 +100,20 @@ and back.
 
 ## 6. Where the libraries stand
 
-Surveyed 2026-11-24. What each library of the family names differently from §3, to be brought to it (a release of
-the family keeps its version: fixed and republished while unused).
+Surveyed and brought to §3 on 2026-11-24 (masters; a release keeps its version: fixed and republished while unused).
+Old public names stay as deprecated aliases where a library has users (Scala, Kotlin, Zig, Lean, TypeScript, Rust).
 
-| Library | Differs in |
+| Library | State |
 |---|---|
-| okay-java | done: the vocabulary is its module okay-java-api, package `okay.effect` (`Op`, `Eff`, `Pure`, `Sensitive`, `Audited`), released 0.1.0. Left: `okay.core.Eff<L, A>` uses `Eff` for a program |
-| okay-direct | done: operations and rows are okay-java-api's (`Op<E, X, Self>`, `Eff`, `Pure`), `Program<A, R>`. Left: handler clauses `value`/`operation` for `ret`/`on`/`answer`; `R` as a handler's result; `Fail` for `Throws`, `Emits` for `Emit`, `VirtualClock` for `Clock`; `Observer.watch` for `observe`; the sensitive mark on the operation (`Audited.Op`) for `Sensitive` on the effect; a dropped rest throws `Abandoned` where the model says `unwind` |
-| okay-scala | `Fail` and `Yield` for `Throws` and `Emit` |
-| okay-simple | `Error` and `Yield` for `Throws` and `Emit`; handlers lower case (`state(0)`) |
-| okay-kotlin | `Fail`; `runEffects` for `run`; `With<E, R>`/`Nil` for the row in data style |
-| okay-zig | `Fail`; `Eff(A, R)` for a program |
-| okay-ts | `Eff<A, E, M>` for a program; `answering`/`deep` for in place/general |
-| okay-lean | `Error` for `Throws` |
-| okay-rust | the machine's `Eff<R, A>` for a program, row first |
+| okay-java | the vocabulary is its module okay-java-api, package `okay.effect` (`Op`, `Eff`, `Pure`, `Sensitive`, `Audited`), released 0.1.0. Open: the capability notation `okay.core` (renamed `Eff<L, A>` → `Comp<L, A>` on master, under review) |
+| okay-direct | on okay-java-api; `Program<A, R>`; `InPlace` (`ret`, `answer`), `Handler` (`ret`, `on`), a result `B`; `Throws` (`run`, `recover`, `catching`, `rethrow`), `Emit` (`send`), `Clock`; `Observer.observe`; `Sensitive.Op` marks a sensitive effect's operations, `Audited` the audited place; `Abandoned` is the model's `unwind` |
+| okay-scala | `Throws` (`run`, `recover`), `Emit` (`send`, `collect`, `each`, `take`) |
+| okay-simple | `Throws`, `Emit`; handlers as `State.run(0)`, `Reader.run(e)`, `Throws.run`, `Choose.all` |
+| okay-kotlin | `Throws`; data-style row `Eff<E, R>`/`Pure`. Kept: `runEffects` (a Kotlin `run` loses to the standard library's `run { }`), `Prog<F, R, A>`'s order |
+| okay-zig | `Throws`; a program is `Comp(A, R)` |
+| okay-ts | a program is `Comp<A, E, M>`; `inPlace`, `general`, `generalMany` |
+| okay-lean | `Throws` |
+| okay-rust | the machine's program `Prog<A, R>`; `Handler<E, A, B, R>`, `K<B, R>`, the row last; `Handler::in_place`/`new`/`abort`; `State::run`, `Reader::run`, `Throws::run`, `Choose::all`/`first`, `Emit::collect` |
 | okay-kernel | below the vocabulary: a protocol between implementations (`Op<X>` with a key, no typed row) — not for programs |
 
 Not differences: one-shot as a type (okay-direct's `MultiEffects`, okay-ts's `M`) is §2.7; a library's own idiom for

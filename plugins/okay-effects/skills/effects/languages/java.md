@@ -33,6 +33,7 @@ From `src/test/java/okay/rows/Properties.java`:
 
 ```java
 import static okay.rows.Effects.*;          // handle, pure, perform, run, up
+import okay.effect.*;          // Op, Eff, Pure (okay-java-api)
 import okay.rows.*;
 import okay.rows.std.State;
 
@@ -70,6 +71,7 @@ import static okay.rows.Effects.*;
 import java.util.*;
 import okay.resumable.Direct;
 import okay.resumable.Suspend;
+import okay.effect.*;          // Op, Eff, Pure (okay-java-api)
 import okay.rows.*;
 
 public abstract static sealed class Prices extends Suspend {          // an effect: a checked exception type

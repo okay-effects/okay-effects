@@ -32,16 +32,16 @@ object Accounts:
         case Balance(who) => cell.get.getOrElse(who, 0)
         case Deposit(who, n) => cell.set(cell.get.updated(who, cell.get.getOrElse(who, 0) + n))))
 
-// the program: any row that has Accounts and Fail
-def payday[R[_]: Has[Accounts] : Has[Fail % String]]: Int ! R =
+// the program: any row that has Accounts and Throws
+def payday[R[_]: Has[Accounts] : Has[Throws % String]]: Int ! R =
   for
     _ <- Accounts.deposit("ann", 100)
     b <- Accounts.balance("ann")
-    _ <- if b > 1000 then Fail.raise("too rich") else unit
+    _ <- if b > 1000 then Throws.raise("too rich") else unit
   yield b
 
-type App[X] = (Accounts + Fail % String)[X]
-run(Fail.run(Accounts.inMemory(Map("ann" -> 50))(payday[App])))   // Right((Map(ann -> 150),150))
+type App[X] = (Accounts + Throws % String)[X]
+run(Throws.run(Accounts.inMemory(Map("ann" -> 50))(payday[App])))   // Right((Map(ann -> 150),150))
 ```
 
 Handler shapes: `Handler.tail` (answers in place), `Handler.stateful` (in place with a `Cell`), `Handler.general`
@@ -56,7 +56,7 @@ val general = Handler.general[Ask, Pure, String, List[String]](a => pure(List(a)
 run(handle(twice, general))   // List("Ann, Ann", "Ann, Bob", "Bob, Ann", "Bob, Bob")
 ```
 
-Standard effects in `okay.scala3.std`: `State`, `Reader`, `Writer`, `Fail`, `Choose` (`among`, `flip`; run by
+Standard effects in `okay.scala3.std`: `State`, `Reader`, `Writer`, `Throws`, `Choose` (`among`, `flip`; run by
 `Choose.all` / `Choose.first`). Handler order matters: `State.run(0)(Choose.all(p))` threads one state through
 all paths, `Choose.all(State.run(0)(p))` gives each path its own.
 

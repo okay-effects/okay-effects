@@ -25,27 +25,27 @@ import java.util.*;
 import okay.direct.Answer;
 import okay.direct.Body;
 import okay.direct.Effect;
-import okay.direct.Effect.Op;
+import okay.effect.Op;
 import okay.direct.Effects;
-import okay.direct.TailHandler;
+import okay.direct.InPlace;
 import okay.direct.loom.LoomEffects;
-import okay.direct.std.Fail;
+import okay.direct.std.Throws;
 
 sealed interface Prices {
-    record Price(String item) implements Prices, Op<Prices, Optional<Integer>> {}
+    record Price(String item) implements Prices, Op<Prices, Optional<Integer>, Price> {}
 }
 
-static int total(Effect<Prices> prices, Effect<Fail<String>> fail, List<String> cart) {   // the program
+static int total(Effect<Prices> prices, Effect<Throws<String>> fail, List<String> cart) {   // the program
     return cart.stream()
         .mapToInt(item -> prices.perform(new Prices.Price(item))
-            .orElseGet(() -> Fail.raise(fail, "no price for " + item)))
+            .orElseGet(() -> Throws.raise(fail, "no price for " + item)))
         .sum();
 }
 
 static <A> A pricesFrom(Effects fx, Map<String, Integer> table, Body<Prices, A, RuntimeException> body) {
-    return fx.handle(new TailHandler<Prices, A, A>() {                                     // the handler
-        public A value(A result) { return result; }
-        public void operation(Prices op, Answer<Prices> k) {
+    return fx.handle(new InPlace<Prices, A, A>() {                                     // the handler
+        public A ret(A result) { return result; }
+        public void answer(Prices op, Answer<Prices> k) {
             switch (op) {
                 case Prices.Price p -> k.answer(p, Optional.ofNullable(table.get(p.item())));
             }
@@ -54,7 +54,7 @@ static <A> A pricesFrom(Effects fx, Map<String, Integer> table, Body<Prices, A, 
 }
 
 Effects fx = new LoomEffects();   // or new ThreadEffects(); created once, at the entry
-var result = Fail.attempt(fx, String.class, fail -> pricesFrom(fx, table, prices -> total(prices, fail, cart)));
+var result = Throws.run(fx, String.class, fail -> pricesFrom(fx, table, prices -> total(prices, fail, cart)));
 // Success[value=...], or Failure[error=no price for coffee]
 ```
 
