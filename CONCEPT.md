@@ -105,7 +105,7 @@ Old public names stay as deprecated aliases where a library has users (Scala, Ko
 
 | Library | State |
 |---|---|
-| okay-java | the vocabulary is its module okay-java-api, package `okay.effect` (`Op`, `Eff`, `Pure`, `Sensitive`, `Audited`), released 0.1.0. Open: the capability notation `okay.core` (renamed `Eff<L, A>` → `Comp<L, A>` on master, under review) |
+| okay-java | the vocabulary is its module okay-java-api, package `okay.effect` (`Op`, `Eff`, `Pure`, `Sensitive`, `Audited`), released 0.1.0. the capability notation `okay.core`: its program `Comp<A, L>` (at the level `L`), the same concept and order as `okay.rows.Comp<A, R>`; one name, one concept, the package the notation |
 | okay-direct | on okay-java-api; `Program<A, R>`; `InPlace` (`ret`, `answer`), `Handler` (`ret`, `on`), a result `B`; `Throws` (`run`, `recover`, `catching`, `rethrow`), `Emit` (`send`), `Clock`; `Observer.observe`; `Sensitive.Op` marks a sensitive effect's operations, `Audited` the audited place; `Abandoned` is the model's `unwind` |
 | okay-scala | `Throws` (`run`, `recover`), `Emit` (`send`, `collect`, `each`, `take`) |
 | okay-simple | `Throws`, `Emit`; handlers as `State.run(0)`, `Reader.run(e)`, `Throws.run`, `Choose.all` |
