@@ -114,7 +114,7 @@ Old public names stay as deprecated aliases where a library has users (Scala, Ko
 | okay-ts | a program is `Comp<A, E, M>`; `inPlace`, `general`, `generalMany` |
 | okay-lean | `Throws` |
 | okay-rust | the machine's program `Prog<A, R>`; `Handler<E, A, B, R>`, `K<B, R>`, the row last; `Handler::in_place`/`new`/`abort`; `State::run`, `Reader::run`, `Throws::run`, `Choose::all`/`first`, `Emit::collect` |
-| okay | its own model, by the author's choice: a row is a UNION of effects, a place found by the effect's class (the keyed root), the order of handlers in the result type only, one effect twice one place (two by `Lexical.handle`). The names are brought to §3 with deprecated aliases (`perform`, `Handler.tail`/`general`/`abort`, `into`, `ensuring`, `Throws.run`); `Emit` is `Writer`'s alias |
+| okay | its own model, by the author's choice: a row is a UNION of effects, a place found by the effect's class (the keyed root), the order of handlers in the result type only, one effect twice one place (two by `Lexical.handle`). Its names are §3's, the old ones deprecated aliases (`perform`, `Handler.tail`/`stateful`/`general`/`abort`, `into`, `ensuring`, `Throws.run`, `Fresh.run`; audit on `import okay.*`, `observe` as `Audit.observe`); `Emit` is `Writer`'s alias. Differs: `State.run` runs to a value; `plus[G]` adds one effect |
 | okay-kernel | below the vocabulary: a protocol between implementations (`Op<X>` with a key, no typed row) — not for programs |
 
 Not differences: one-shot as a type (okay-direct's `MultiEffects`, okay-ts's `M`) is §2.7; a library's own idiom for
