@@ -6,7 +6,11 @@ a program is ordinary Java code that receives capabilities (`Effect<E>`); contin
 (`okay-direct-scala`) and cats/ZIO adapters exist.
 
 ```kotlin
-repositories { mavenCentral(); maven("https://okay-effects.github.io/okay-direct/maven") }
+repositories {
+    mavenCentral()
+    maven("https://okay-effects.github.io/okay-direct/maven")
+    maven("https://okay-effects.github.io/okay-java/maven")   // okay-java-api, the vocabulary
+}
 dependencies {
     implementation("io.github.okay-effects:okay-direct-std:0.1.0")
     implementation("io.github.okay-effects:okay-direct-loom:0.1.0")
