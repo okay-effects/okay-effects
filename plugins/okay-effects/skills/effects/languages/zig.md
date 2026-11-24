@@ -24,8 +24,8 @@ pub fn State(comptime S: type) type {
         pub fn Answer(comptime tag: std.meta.Tag(Op)) type {
             return switch (tag) { .get => S, .put => void };
         }
-        pub fn get(b: *Build, comptime R: anytype) Eff(S, R) { return b.perform(R, Self, .get, {}); }
-        pub fn put(b: *Build, comptime R: anytype, s: S) Eff(void, R) { return b.perform(R, Self, .put, s); }
+        pub fn get(b: *Build, comptime R: anytype) Comp(S, R) { return b.perform(R, Self, .get, {}); }
+        pub fn put(b: *Build, comptime R: anytype, s: S) Comp(void, R) { return b.perform(R, Self, .put, s); }
         pub const Cell = struct {               // a handler: methods = operations
             pub const Effect = Self;
             s: *S,
@@ -69,7 +69,7 @@ var a = std.heap.ArenaAllocator.init(allocator); defer a.deinit();
 var b = ok.Build{ .arena = a.allocator() };
 const R = ok.Row(.{S.Choose});
 const p = b.then(S.Choose.flip(&b, R), {}, struct {
-    fn f(_: void, bb: *ok.Build, x: bool) ok.Eff(u8, R) {
+    fn f(_: void, bb: *ok.Build, x: bool) ok.Comp(u8, R) {
         return bb.map(S.Choose.flip(bb, R), x, struct {
             fn g(first: bool, second: bool) u8 {
                 return @as(u8, if (first) 2 else 0) + @as(u8, if (second) 1 else 0);

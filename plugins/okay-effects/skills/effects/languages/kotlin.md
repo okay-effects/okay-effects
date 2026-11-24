@@ -18,7 +18,7 @@ fun interface Ask {                       // the effect: an interface of suspend
     suspend fun ask(): Int
 }
 
-context(a: Ask, f: Fail<String>)          // the program: its row is its context parameters
+context(a: Ask, f: Throws<String>)          // the program: its row is its context parameters
 suspend fun checked(): Int {
     val x = a.ask()
     ensure(x <= 5) { "big $x" }

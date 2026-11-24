@@ -11,7 +11,7 @@ npm install github:okay-effects/okay-ts
 Effect, program, handler, run (from `test/std.test.ts`, `test/intercept.test.ts`):
 
 ```ts
-import { effect, op, answering, eff, Reader, State, of } from "okay-ts"
+import { effect, op, inPlace, eff, Reader, State, of } from "okay-ts"
 
 const Pay = effect("Pay", {
   transfer: op<[to: string, amount: number], string>(),
@@ -30,22 +30,22 @@ const p = eff(function* () {                   // a generator program: one-shot
 
 p.handle(Config.value(5)).handle(Counter.from(1)).run()   // [6, 12]; run() exists only on the empty row
 
-const inPlace = answering(Pay, { transfer: (to, n) => `ok:${to}:${n}`, balance: () => 0 })
+const bank = inPlace(Pay, { transfer: (to, n) => `ok:${to}:${n}`, balance: () => 0 })
 ```
 
-Other handler forms: `stateful(tag, s0, clauses)`, `deep(tag, ret, clauses)`, `deepMany(tag, ret, clauses)`
+Other handler forms: `stateful(tag, s0, clauses)`, `general(tag, ret, clauses)`, `generalMany(tag, ret, clauses)`
 (`src/effects.ts`).
 
 Multi-shot: only for programs written as data (`Do`, `flatMap`, `pure`); generators stay one-shot (no replay —
-passing a generator to `all`/`first`/`deepMany` is a type error and throws `ResumedTwice`). From
+passing a generator to `all`/`first`/`generalMany` is a type error and throws `ResumedTwice`). From
 `test/acceptance.test.ts`:
 
 ```ts
-import { effect, op, deepMany, pure, Do, State, of } from "okay-ts"
+import { effect, op, generalMany, pure, Do, State, of } from "okay-ts"
 
 const S = State("S", of<number>())
 const Two = effect("Two", { pick: op<[], number>() })
-const twice = deepMany(Two, (a: number) => pure([a]), {
+const twice = generalMany(Two, (a: number) => pure([a]), {
   pick: (k) => {
     const one = k(1)
     const two = k(2)
