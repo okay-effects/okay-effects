@@ -105,8 +105,8 @@ the family keeps its version: fixed and republished while unused).
 
 | Library | Differs in |
 |---|---|
-| okay-java | the vocabulary is in `okay.rows` with the machine: to move to the shared Java vocabulary `okay.effect` (`Op`, `Eff`, `Pure`, `Sensitive`, `Audited`); `okay.core.Eff<L, A>` uses `Eff` for a program |
-| okay-direct | `Effect.Op<F, X>` without `Self`; its own `Eff`/`Pure`; handler clauses `value`/`operation` for `ret`/`on`/`answer`; `R` as a handler's result; `Fail` for `Throws`, `Emits` for `Emit`, `VirtualClock` for `Clock`; `Observer.watch` for `observe`; the sensitive mark on the operation (`Audited.Op`) for `Sensitive` on the effect; a dropped rest throws `Abandoned` where the model says `unwind` |
+| okay-java | done: the vocabulary is its module okay-java-api, package `okay.effect` (`Op`, `Eff`, `Pure`, `Sensitive`, `Audited`), released 0.1.0. Left: `okay.core.Eff<L, A>` uses `Eff` for a program |
+| okay-direct | done: operations and rows are okay-java-api's (`Op<E, X, Self>`, `Eff`, `Pure`), `Program<A, R>`. Left: handler clauses `value`/`operation` for `ret`/`on`/`answer`; `R` as a handler's result; `Fail` for `Throws`, `Emits` for `Emit`, `VirtualClock` for `Clock`; `Observer.watch` for `observe`; the sensitive mark on the operation (`Audited.Op`) for `Sensitive` on the effect; a dropped rest throws `Abandoned` where the model says `unwind` |
 | okay-scala | `Fail` and `Yield` for `Throws` and `Emit` |
 | okay-simple | `Error` and `Yield` for `Throws` and `Emit`; handlers lower case (`state(0)`) |
 | okay-kotlin | `Fail`; `runEffects` for `run`; `With<E, R>`/`Nil` for the row in data style |
