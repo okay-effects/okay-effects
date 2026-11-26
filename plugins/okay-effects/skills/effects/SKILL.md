@@ -47,7 +47,7 @@ Details, examples of the shape and the reasons: [design.md](design.md).
 | language | library | quick start |
 |---|---|---|
 | Scala 3 | okay-scala (rows, one CEK machine) | [languages/scala.md](languages/scala.md) |
-| Java 25 | okay-java: `okay.rows` (rows), `okay.resumable` (direct) | [languages/java.md](languages/java.md) |
+| Java 25 | okay-java: `okay.rows.Sets` (rows as sets: start), `okay.rows` (places), `okay.resumable` (direct, plugin) | [languages/java.md](languages/java.md) |
 | Java 25 + Scala fronts | okay-direct (direct style on Loom) | [languages/direct.md](languages/direct.md) |
 | Scala 3 (simple) | okay-simple (Free, Machine, tagless) | [languages/simple.md](languages/simple.md) |
 | Kotlin | okay-kotlin | [languages/kotlin.md](languages/kotlin.md) |

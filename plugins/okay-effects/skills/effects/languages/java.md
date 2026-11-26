@@ -1,11 +1,14 @@
 # okay-java
 
-Repo: <https://github.com/okay-effects/okay-java> (README.md, `docs/rows.md`, `resumable/README.md`). Java 25. Two
-styles over one machine:
+Repo: <https://github.com/okay-effects/okay-java> (README.md, `docs/start.md`, `docs/rows.md`,
+`resumable/README.md`). Java 25. One machine, one kind of handler, three ways to type and write a program:
 
-- `okay.rows` — programs as data (`Comp<A, R>`), the row a nested type `Eff<E1, Eff<E2, ?>>`; multi-shot `k`.
-- `okay.resumable` — direct style: plain Java methods whose effects are checked exceptions (`throws Prices`),
-  turned into resumable code by a Gradle/Maven bytecode plugin; handlers are the same `okay.rows` handlers.
+- `okay.rows.Sets` — START HERE (`docs/start.md`): a program's row is a type bounded by the effects it asks,
+  `<R extends Prices & Ask> Comp<String, R>`; chains, blocks, and plain Java (`Direct.body`, no plugin needed).
+- `okay.rows` with rows of places — `Comp<A, Eff<E1, Eff<E2, ?>>>`, `up` for the second effect (`docs/places.md`):
+  where two handlers of one effect must be told apart by place.
+- `okay.resumable` — direct style with the bytecode plugin: plain methods whose effects are checked exceptions
+  (`throws Prices`), a rest resumed more than once in plain Java.
 
 Dependency: released 0.1.0, `io.github.okay-effects:okay-java:0.1.0` (also `okay-java-resumable`,
 `okay-java-spring-boot`) from https://okay-effects.github.io/okay-java/maven; its one dependency, `okay-kernel-api`,
@@ -27,7 +30,62 @@ repositories {
 Maven: `io.github.okay-effects:okay-java-resumable-maven-plugin:0.1.0` (goals `transform`, `transform-test`), the
 three repositories as `<repositories>` and `<pluginRepositories>` both.
 
-## okay.rows
+## Rows as sets (start here)
+
+From `docs/start.md` (`StartTest`, `SetBodyTest`); built and run against the released 0.1.0:
+
+```java
+import static okay.rows.Sets.*;      // perform, together, answering, handle, row, of, run, pure, fold, ..
+import okay.effect.*;                // Operation, Eff, Pure
+import okay.rows.*;                  // Comp, Var
+import okay.resumable.Direct;        // plain Java: okay-java-resumable on the class path, no plugin
+
+// an effect: a sealed interface; each operation a record naming its answer and its effect
+sealed interface Ids { record Ref(String prefix) implements Ids, Operation<String, Ids> {} }
+sealed interface Clock { record Now() implements Clock, Operation<Long, Clock> {} }
+
+// a program: its row is the set of what it asks, in any order; a block..
+static <R extends Ids & Clock> Comp<String, R> block() {
+  return together(t -> {
+    Var<String> ref = t.perform(new Ids.Ref("B"));
+    Var<Long> now = t.perform(new Clock.Now());
+    return t.yield(ref.with(now, (r, n) -> r + "@" + n));
+  });
+}
+// ..or plain Java: answers in locals, for and if as they are; a program of the row as a part of it
+static <R extends Ids & Clock> Comp<String, R> body() {
+  return Direct.body(d -> {
+    StringBuilder s = new StringBuilder();
+    for (String p : List.of("x", "y")) s.append(d.perform(new Ids.Ref(p))).append(' ');
+    return s.toString() + d.perform(new Clock.Now()) + " " + d.embed(block());
+  });
+}
+
+// a handler: a function over a program whose row is a LIST that begins with its effect
+static <A, R> Comp<A, R> identified(Comp<A, ? super Eff<Ids, R>> c) {            // with a state
+  return handle(1, (n, op, k) -> switch (op) { case Ids.Ref r -> k.resume(r, r.prefix() + "-" + n, n + 1); }, c);
+}
+static <A, R> Comp<A, R> clocked(Comp<A, ? super Eff<Clock, R>> c) {             // only answers
+  return answering(op -> switch (op) { case Clock.Now n -> n.answer(7L); }, c);
+}
+
+// where the handlers are put: the set written as a list, once; run at the entry point
+var app = row(of(Ids.class, Clock.class));
+String s = run(clocked(identified(app.of(body()))));                             // "x-1 y-2 7 B-3@7"
+```
+
+A chain is `perform(op).flatMap(..)`, `fold(xs, zero, (acc, x) -> ..)`. Handlers: `answering`, `handle((op, k) ->
+..)` (`k.resume(op, x)`, `k.unwind()`, twice for multi-shot), `handle(a -> .., (op, k) -> ..)` for a value of its
+own, `handle(s0, (s, op, k) -> ..)`, a second clause `(ops, k) -> ..` for a set at once; the library's
+(`State.run`, `Clock.at`, `Choose.all`) go around the same way, `Sets.<State<Integer>>the(State.class)` in the
+list. The boundary kept in a field or a bean: `final class Shop<V extends Ids & Clock> { <A> A run(Comp<A, ? super
+V> p) { var row = Sets.<V>exactly(Shop.class).row(of(Ids.class, Clock.class)); .. } }`, `Shop<?> shop`. A handler
+inside a program: `h(Sets.<R>keep().row(of(X.class)).of(part))`. Rules: write a handler where its effect is a
+named type (it learns the effect's class there); an operation is answered by the nearest handler of its effect —
+no places, so two handlers of one effect are two scopes; a `Direct.body`'s rest is resumed once.
+
+## okay.rows: rows of places
+
 
 From `src/test/java/okay/rows/Properties.java`:
 
